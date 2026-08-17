@@ -13,11 +13,11 @@ first-party.
 
 ## Public auth contract
 
-- Origin: `https://hevy-mcp.oddie.app`
-- MCP: `https://hevy-mcp.oddie.app/mcp`
+- Self-host. Origin: `https://hevy-mcp.your-domain.example`
+- MCP: `https://hevy-mcp.your-domain.example/mcp`
 - Connector auth is `Authorization: Bearer <Hevy API key>`.
 - Forward that same value to Hevy as the `api-key` header.
-- No Logto, DCR, OAuth, or OIDC. Do not serve RFC 9728 metadata.
+- Bearer only. Do not serve RFC 9728 metadata.
 - Unauthenticated `/mcp` returns `401` with no `WWW-Authenticate` header.
 - `/.well-known/oauth-*` and `openid-configuration` return `404` with no `WWW-Authenticate`.
 - Never log Authorization headers or the Hevy API key.
@@ -59,7 +59,7 @@ Required regression coverage:
 ## Known pitfalls
 
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
-  no longer advertised by the Forgejo mirror. Verify pinned revisions with
+  no longer advertised by the action mirror. Verify pinned revisions with
   `git ls-remote` and update to an advertised immutable commit.
 - Forgejo Runner does not apply the default `stable` input from
   `dtolnay/rust-toolchain`; pass `toolchain: stable` explicitly.

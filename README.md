@@ -1,10 +1,10 @@
 # hevy-mcp
 
-First-party Rust MCP server for Hevy. It uses axum, rmcp streamable HTTP, and
-a thin rustls-only client for Hevy's official REST API. It does not use
-Logto, DCR, OAuth, OIDC, a third-party Hevy MCP server, or a Hevy client crate.
+Rust MCP server for the Hevy workout API. It uses axum, rmcp streamable HTTP, and
+a thin rustls-only client for Hevy's official REST API. It does not use a
+third-party Hevy MCP server or a Hevy client crate.
 
-Public endpoint: `https://hevy-mcp.oddie.app/mcp`
+Self-host the `/mcp` endpoint on your own domain.
 
 ## Authentication
 
@@ -46,7 +46,7 @@ HEVY_MCP_BIND_ADDR=0.0.0.0:3000
 HEVY_MCP_METRICS_BIND_ADDR=127.0.0.1:9090
 HEVY_MCP_RATE_LIMIT_READS_PER_MIN=60
 HEVY_MCP_RATE_LIMIT_WRITES_PER_MIN=30
-HEVY_MCP_ALLOWED_HOSTS=localhost,127.0.0.1,::1,hevy-mcp.oddie.app
+HEVY_MCP_ALLOWED_HOSTS=localhost,127.0.0.1,::1,hevy-mcp.your-domain.example
 HEVY_MCP_LOG_FORMAT=json
 ```
 
