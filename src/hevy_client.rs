@@ -1,8 +1,8 @@
 //! Thin first-party client for Hevy's public REST API.
 //!
-//! The API key is process configuration, never caller input. It is attached
-//! only as the `api-key` request header and omitted from every `Debug` value
-//! and error message.
+//! The API key is attached per request through [`HevyClient::with_api_key`].
+//! It is sent only as the `api-key` header and omitted from every `Debug`
+//! value and error message.
 
 use std::time::Duration;
 
@@ -77,7 +77,7 @@ impl std::fmt::Debug for HevyClient {
 }
 
 impl HevyClient {
-    pub fn new(base_url: &str, api_key: Option<String>) -> anyhow::Result<Self> {
+    pub fn new(base_url: &str) -> anyhow::Result<Self> {
         let mut base_url = Url::parse(base_url)?;
         anyhow::ensure!(
             matches!(base_url.scheme(), "http" | "https") && base_url.host_str().is_some(),
@@ -94,12 +94,18 @@ impl HevyClient {
         Ok(Self {
             http,
             base_url,
-            api_key: api_key.filter(|key| !key.trim().is_empty()),
+            api_key: None,
         })
     }
 
-    pub const fn is_configured(&self) -> bool {
-        self.api_key.is_some()
+    /// Clone the shared HTTP client and base URL with one request's Hevy key.
+    #[must_use]
+    pub fn with_api_key(&self, key: &str) -> Self {
+        Self {
+            http: self.http.clone(),
+            base_url: self.base_url.clone(),
+            api_key: (!key.trim().is_empty()).then(|| key.to_owned()),
+        }
     }
 
     pub async fn user_info(&self) -> Result<Value, HevyError> {
@@ -796,7 +802,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = HevyClient::new(&server.uri(), Some("test-hevy-key".to_owned())).unwrap();
+        let client = HevyClient::new(&server.uri())
+            .unwrap()
+            .with_api_key("test-hevy-key");
         let response = client.list_workouts(Some(2), Some(10)).await.unwrap();
 
         assert_eq!(response["workouts"][0]["id"], "workout-1");
@@ -815,7 +823,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = HevyClient::new(&server.uri(), Some("test-hevy-key".to_owned())).unwrap();
+        let client = HevyClient::new(&server.uri())
+            .unwrap()
+            .with_api_key("test-hevy-key");
         let response = client.user_info().await.unwrap();
 
         assert_eq!(response["data"]["id"], "hevy-user");
@@ -823,8 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_key_is_structured_and_does_not_block_construction() {
-        let client = HevyClient::new("https://api.hevyapp.com", None).unwrap();
-        assert!(!client.is_configured());
+        let client = HevyClient::new("https://api.hevyapp.com").unwrap();
         let error = client.list_workouts(None, None).await.unwrap_err();
         assert_eq!(error.code(), "hevy_api_key_missing");
         assert_eq!(error.to_string(), "hevy_api_key_missing");
@@ -832,11 +841,9 @@ mod tests {
 
     #[test]
     fn debug_redacts_api_key() {
-        let client = HevyClient::new(
-            "https://api.hevyapp.com",
-            Some("never-print-this-key".to_owned()),
-        )
-        .unwrap();
+        let client = HevyClient::new("https://api.hevyapp.com")
+            .unwrap()
+            .with_api_key("never-print-this-key");
         let debug = format!("{client:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("never-print-this-key"));

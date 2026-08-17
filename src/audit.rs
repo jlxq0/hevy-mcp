@@ -1,14 +1,13 @@
 //! Envelope-only audit logging.
 //!
-//! Every tool call and token validation emits a structured `tracing::info`
-//! event at `target: "hevy_mcp::audit"`. The cluster's Alloy collector ships
-//! these to Loki keyed by `target`.
+//! Every tool call emits a structured `tracing::info` event at target
+//! `hevy_mcp::audit`. The cluster's Alloy collector ships these to Loki.
 //!
 //! ## What is and isn't logged
 //!
-//! Envelope fields **are** logged: `event`, `user` (email/sub), `method`
-//! (MCP tool name), `resource` (Hevy ID/date when relevant), `outcome`,
-//! `latency_ms`, `result_count`, `error_class`, `token_hash` (16 hex chars of
+//! Envelope fields **are** logged: `event`, `method` (MCP tool name),
+//! `resource` (Hevy ID/date when relevant), `outcome`, `latency_ms`,
+//! `result_count`, `error_class`, and `token_hash` (16 hex chars of
 //! `sha256(bearer)`).
 //!
 //! Content fields **are not** logged: workout/routine titles, notes, request
@@ -30,8 +29,6 @@ pub mod outcome {
     pub const NOT_FOUND: &str = "not_found";
     pub const INVALID: &str = "invalid";
     pub const UNAUTHORIZED: &str = "unauthorized";
-    pub const ACTIVE: &str = "active";
-    pub const INACTIVE: &str = "inactive";
     pub const RATE_LIMITED: &str = "rate_limited";
 }
 
@@ -65,7 +62,7 @@ pub const fn error_class(err: &ErrorData) -> &'static str {
 /// both success and error paths. Also bumps the matching Prometheus metric.
 pub fn tool_call(
     tool: &'static str,
-    user: &str,
+    token_hash: &str,
     resource: Option<&str>,
     outcome: &'static str,
     started: Instant,
@@ -81,7 +78,7 @@ pub fn tool_call(
         target: "hevy_mcp::audit",
         event = "tool_call",
         method = tool,
-        user,
+        token_hash,
         resource = safe_resource,
         outcome,
         latency_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
@@ -100,20 +97,6 @@ fn is_safe_id(id: &str) -> bool {
         && id.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | ':' | '/' | '%')
         })
-}
-
-/// Emit an `introspect` (token-validation) audit event from the auth path.
-pub fn introspect(token_hash: &str, outcome: &'static str, started: Instant, user: Option<&str>) {
-    let elapsed = started.elapsed();
-    info!(
-        target: "hevy_mcp::audit",
-        event = "introspect",
-        token_hash,
-        user,
-        outcome,
-        latency_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-    );
-    crate::metrics::record_introspect(outcome, elapsed);
 }
 
 #[cfg(test)]

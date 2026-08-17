@@ -15,7 +15,6 @@
 //!
 //! - tool name (8)
 //! - outcome class (`ok`, `error`, `denied`, etc. — handful)
-//! - introspect outcome (`active`, `inactive`, `error`)
 //!
 //! Per-user fan-out is what the audit log is for. Mixing it into
 //! metrics breaks the Prometheus storage model and leaks user identity
@@ -35,8 +34,7 @@ use std::time::Duration;
 use axum::http::header;
 use axum::response::IntoResponse;
 use prometheus::{
-    Encoder, HistogramVec, IntCounterVec, TextEncoder, register_histogram_vec_with_registry,
-    register_int_counter_vec_with_registry,
+    Encoder, HistogramVec, IntCounterVec, TextEncoder, register_int_counter_vec_with_registry,
 };
 use std::sync::LazyLock;
 
@@ -44,9 +42,6 @@ use std::sync::LazyLock;
 const TOOL_LATENCY_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
-
-/// Buckets for Logto token validation.
-const INTROSPECT_LATENCY_BUCKETS: &[f64] = &[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
 
 pub static TOOL_CALLS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec_with_registry!(
@@ -71,29 +66,6 @@ pub static TOOL_LATENCY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     .expect("register tool_latency_seconds once")
 });
 
-pub static INTROSPECT_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    register_int_counter_vec_with_registry!(
-        "hevy_mcp_introspect_total",
-        "Total Logto token validations. Labels: outcome (active|inactive|error).",
-        &["outcome"],
-        prometheus::default_registry()
-    )
-    .expect("register introspect_total once")
-});
-
-pub static INTROSPECT_LATENCY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
-    register_histogram_vec_with_registry!(
-        prometheus::HistogramOpts::new(
-            "hevy_mcp_introspect_latency_seconds",
-            "Logto token-validation latency, in seconds."
-        )
-        .buckets(INTROSPECT_LATENCY_BUCKETS.to_vec()),
-        &["outcome"],
-        prometheus::default_registry()
-    )
-    .expect("register introspect_latency_seconds once")
-});
-
 /// Initialize all metrics. Idempotent — `LazyLock` ensures
 /// registration only happens once. Call this once at startup so the
 /// scraped `/metrics` text always lists the families even before
@@ -101,8 +73,6 @@ pub static INTROSPECT_LATENCY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(||
 pub fn init() {
     LazyLock::force(&TOOL_CALLS_TOTAL);
     LazyLock::force(&TOOL_LATENCY_SECONDS);
-    LazyLock::force(&INTROSPECT_TOTAL);
-    LazyLock::force(&INTROSPECT_LATENCY_SECONDS);
 }
 
 /// Record a finished tool call.
@@ -110,14 +80,6 @@ pub fn record_tool_call(tool: &str, outcome: &str, elapsed: Duration) {
     TOOL_CALLS_TOTAL.with_label_values(&[tool, outcome]).inc();
     TOOL_LATENCY_SECONDS
         .with_label_values(&[tool])
-        .observe(elapsed.as_secs_f64());
-}
-
-/// Record a finished introspection round-trip.
-pub fn record_introspect(outcome: &str, elapsed: Duration) {
-    INTROSPECT_TOTAL.with_label_values(&[outcome]).inc();
-    INTROSPECT_LATENCY_SECONDS
-        .with_label_values(&[outcome])
         .observe(elapsed.as_secs_f64());
 }
 
@@ -183,13 +145,11 @@ mod tests {
         // once to materialise them before asserting.
         init();
         record_tool_call("__families_test", "ok", Duration::from_millis(1));
-        record_introspect("active", Duration::from_millis(1));
         let mfs = prometheus::gather();
-        let names: Vec<_> = mfs
-            .iter()
-            .map(prometheus::proto::MetricFamily::get_name)
-            .collect();
-        assert!(names.contains(&"hevy_mcp_tool_calls_total"));
-        assert!(names.contains(&"hevy_mcp_introspect_total"));
+        assert!(
+            mfs.iter()
+                .any(|family| prometheus::proto::MetricFamily::get_name(family)
+                    == "hevy_mcp_tool_calls_total")
+        );
     }
 }

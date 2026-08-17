@@ -23,7 +23,7 @@ COPY src ./src
 RUN cargo build --release --locked
 
 # Distroless runtime: no shell, no apt. `cc` variant ships glibc + ca-certs,
-# which we need for HTTPS to Logto (JWKS) and Hevy.
+# which we need for HTTPS to Hevy.
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:e2d29aec8061843706b7e484c444f78fafb05bfe47745505252b1769a05d14f1
 
 WORKDIR /app

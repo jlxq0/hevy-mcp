@@ -1,6 +1,6 @@
 [package]
 name = "hevy-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 description = "First-party streamable-HTTP MCP server for the Hevy REST API"
@@ -13,8 +13,7 @@ tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "rt", "sign
 axum = "0.7"
 # Prometheus metrics, text-format only (drops the vulnerable protobuf 2.x dep).
 prometheus = { version = "0.13", default-features = false }
-# Token-bucket rate limiting. Per-identity buckets keyed on sha256(bearer)[..16]
-# and on the Logto `sub`.
+# Token-bucket rate limiting. Per-key buckets use sha256(bearer)[..16].
 governor = "0.7"
 http = "1"
 tower = "0.5"
@@ -32,18 +31,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
-# rustls-only HTTP client for Hevy calls, JWKS fetch from Logto,
-# and SSRF-guarded outbound URL fetches.
+# rustls-only HTTP client for Hevy calls and SSRF-guarded outbound URL fetches.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # SHA-256 of access tokens for cache keys — never store the raw token as a key.
 sha2 = "0.10"
 # Constant-time scheme comparison in the bearer extractor.
 subtle = "2.6"
-# Random OAuth proxy state.
-rand = "0.8"
-# Logto access-token validation: RS256 JWT signature + aud/exp checks against
-# the JWKS published at {authorization_server}/jwks.
-jsonwebtoken = "9.3"
 # Official MCP Rust SDK. `transport-streamable-http-server` enables the
 # session manager + http transport we mount via `Router::nest_service`.
 # rmcp re-exports `schemars` (1.x) — we use `rmcp::schemars`, never a
@@ -57,7 +50,7 @@ hex = "0.4"
 url = "2.5"
 
 [dev-dependencies]
-# Mock Hevy REST + Logto JWKS endpoints in tests.
+# Mock Hevy REST endpoints in tests.
 wiremock = "0.6"
 
 [profile.release]

@@ -19,7 +19,6 @@ use crate::hevy_client::{
     BodyMeasurementInput, CreateExerciseTemplateBody, CreateRoutineFolderBody, HevyClient,
     HevyError, RoutineInput, UpdateBodyMeasurementInput, WorkoutInput,
 };
-use crate::logto_oidc::AuthenticatedIdentity;
 use crate::rate_limit::{Category, Limiter};
 
 const HEVY_API_KEY_MISSING_CODE: i32 = -32_010;
@@ -54,10 +53,9 @@ impl HevyMcpService {
         category: Category,
     ) -> Result<(), ErrorData> {
         let token = token_from_context(context).ok_or_else(missing_token_error)?;
-        let identity = identity_from_context(context).ok_or_else(missing_identity_error)?;
         let bearer_hash = audit::token_hash(&token.0);
         self.rate_limiter
-            .check(&bearer_hash, Some(identity.user_id.as_str()), category)
+            .check(&bearer_hash, category)
             .map_err(|_| {
                 ErrorData::new(
                     rmcp::model::ErrorCode(audit::RATE_LIMITED_CODE),
@@ -65,6 +63,14 @@ impl HevyMcpService {
                     None,
                 )
             })
+    }
+
+    fn hevy_from_context(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<HevyClient, ErrorData> {
+        let token = token_from_context(context).ok_or_else(missing_token_error)?;
+        Ok(self.hevy.with_api_key(&token.0))
     }
 
     async fn run_hevy_call<F>(
@@ -79,9 +85,8 @@ impl HevyMcpService {
         F: Future<Output = Result<Value, HevyError>>,
     {
         let started = Instant::now();
-        let identity = identity_from_context(context);
-        let user = user_label(identity.as_ref());
-        let span = make_tool_span(tool, &user, resource);
+        let token_hash = token_hash_from_context(context).unwrap_or_default();
+        let span = make_tool_span(tool, &token_hash, resource);
         let result = async {
             self.rate_limit_check(context, category)?;
             let value = future.await.map_err(map_hevy_error)?;
@@ -89,14 +94,9 @@ impl HevyMcpService {
         }
         .instrument(span.clone())
         .await;
-        emit_tool_audit(tool, &user, resource, started, None, &span, &result);
+        emit_tool_audit(tool, &token_hash, resource, started, None, &span, &result);
         result
     }
-}
-
-fn identity_from_context(context: &RequestContext<RoleServer>) -> Option<AuthenticatedIdentity> {
-    let parts = context.extensions.get::<http::request::Parts>()?;
-    parts.extensions.get::<AuthenticatedIdentity>().cloned()
 }
 
 fn token_from_context(context: &RequestContext<RoleServer>) -> Option<AccessToken> {
@@ -104,15 +104,15 @@ fn token_from_context(context: &RequestContext<RoleServer>) -> Option<AccessToke
     parts.extensions.get::<AccessToken>().cloned()
 }
 
+fn token_hash_from_context(context: &RequestContext<RoleServer>) -> Option<String> {
+    token_from_context(context).map(|token| audit::token_hash(&token.0))
+}
+
 fn structured_result<T: Serialize>(value: &T) -> Result<rmcp::model::CallToolResult, ErrorData> {
     let value = serde_json::to_value(value).map_err(|error| {
         ErrorData::internal_error(format!("serialize tool result: {error}"), None)
     })?;
     Ok(rmcp::model::CallToolResult::structured(value))
-}
-
-fn missing_identity_error() -> ErrorData {
-    ErrorData::internal_error("no authenticated identity in request context", None)
 }
 
 fn missing_token_error() -> ErrorData {
@@ -145,11 +145,11 @@ fn map_hevy_error(error: HevyError) -> ErrorData {
     }
 }
 
-fn make_tool_span(tool: &'static str, user: &str, resource: Option<&str>) -> Span {
+fn make_tool_span(tool: &'static str, token_hash: &str, resource: Option<&str>) -> Span {
     tracing::info_span!(
         "mcp.tool",
         tool,
-        user,
+        token_hash,
         resource = resource.unwrap_or(""),
         outcome = tracing::field::Empty,
         latency_ms = tracing::field::Empty,
@@ -158,7 +158,7 @@ fn make_tool_span(tool: &'static str, user: &str, resource: Option<&str>) -> Spa
 
 fn emit_tool_audit(
     tool: &'static str,
-    user: &str,
+    token_hash: &str,
     resource: Option<&str>,
     started: Instant,
     result_count: Option<usize>,
@@ -185,32 +185,13 @@ fn emit_tool_audit(
     );
     audit::tool_call(
         tool,
-        user,
+        token_hash,
         resource,
         outcome_value,
         started,
         result_count,
         error_class,
     );
-}
-
-fn user_label(identity: Option<&AuthenticatedIdentity>) -> String {
-    identity
-        .and_then(|value| value.email.clone())
-        .or_else(|| identity.map(|value| value.user_id.clone()))
-        .unwrap_or_default()
-}
-
-#[derive(Debug, Serialize)]
-struct WhoamiResult {
-    sub: String,
-    email: Option<String>,
-    name: Option<String>,
-    hevy_api_key_configured: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hevy_user: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hevy_status: Option<&'static str>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -323,42 +304,16 @@ struct UpdateBodyMeasurementParams {
 #[tool_router(router = hevy_router)]
 impl HevyMcpService {
     #[tool(
-        description = "Return the authenticated Logto identity and, when configured, the matching Hevy user profile.",
+        description = "Return the Hevy user profile for the request's API key.",
         annotations(title = "Who am I", read_only_hint = true, idempotent_hint = true)
     )]
     async fn whoami(
         &self,
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-        let started = Instant::now();
-        let identity = identity_from_context(&context);
-        let user = user_label(identity.as_ref());
-        let span = make_tool_span("whoami", &user, None);
-        let result = async {
-            self.rate_limit_check(&context, Category::Read)?;
-            let identity = identity.ok_or_else(missing_identity_error)?;
-            let configured = self.hevy.is_configured();
-            let (hevy_user, hevy_status) = if configured {
-                match self.hevy.user_info().await {
-                    Ok(user) => (Some(user), None),
-                    Err(error) => (None, Some(error.code())),
-                }
-            } else {
-                (None, None)
-            };
-            structured_result(&WhoamiResult {
-                sub: identity.user_id,
-                email: identity.email,
-                name: identity.name,
-                hevy_api_key_configured: configured,
-                hevy_user,
-                hevy_status,
-            })
-        }
-        .instrument(span.clone())
-        .await;
-        emit_tool_audit("whoami", &user, None, started, None, &span, &result);
-        result
+        let hevy = self.hevy_from_context(&context)?;
+        self.run_hevy_call(&context, "whoami", None, Category::Read, hevy.user_info())
+            .await
     }
 
     #[tool(
@@ -370,12 +325,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<PaginationParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "list_workouts",
             None,
             Category::Read,
-            self.hevy.list_workouts(params.page, params.page_size),
+            hevy.list_workouts(params.page, params.page_size),
         )
         .await
     }
@@ -389,12 +345,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<WorkoutIdParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "get_workout",
             Some(&params.workout_id),
             Category::Read,
-            self.hevy.get_workout(&params.workout_id),
+            hevy.get_workout(&params.workout_id),
         )
         .await
     }
@@ -413,12 +370,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateWorkoutParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "create_workout",
             None,
             Category::Write,
-            self.hevy.create_workout(&params.workout),
+            hevy.create_workout(&params.workout),
         )
         .await
     }
@@ -437,13 +395,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<UpdateWorkoutParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "update_workout",
             Some(&params.workout_id),
             Category::Write,
-            self.hevy
-                .update_workout(&params.workout_id, &params.workout),
+            hevy.update_workout(&params.workout_id, &params.workout),
         )
         .await
     }
@@ -460,12 +418,13 @@ impl HevyMcpService {
         &self,
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "count_workouts",
             None,
             Category::Read,
-            self.hevy.count_workouts(),
+            hevy.count_workouts(),
         )
         .await
     }
@@ -483,13 +442,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<WorkoutEventsParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "list_workout_events",
             None,
             Category::Read,
-            self.hevy
-                .list_workout_events(params.since.as_deref(), params.page, params.page_size),
+            hevy.list_workout_events(params.since.as_deref(), params.page, params.page_size),
         )
         .await
     }
@@ -503,12 +462,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<PaginationParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "list_routines",
             None,
             Category::Read,
-            self.hevy.list_routines(params.page, params.page_size),
+            hevy.list_routines(params.page, params.page_size),
         )
         .await
     }
@@ -522,12 +482,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<RoutineIdParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "get_routine",
             Some(&params.routine_id),
             Category::Read,
-            self.hevy.get_routine(&params.routine_id),
+            hevy.get_routine(&params.routine_id),
         )
         .await
     }
@@ -546,12 +507,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateRoutineParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "create_routine",
             None,
             Category::Write,
-            self.hevy.create_routine(&params.routine),
+            hevy.create_routine(&params.routine),
         )
         .await
     }
@@ -570,13 +532,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<UpdateRoutineParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "update_routine",
             Some(&params.routine_id),
             Category::Write,
-            self.hevy
-                .update_routine(&params.routine_id, &params.routine),
+            hevy.update_routine(&params.routine_id, &params.routine),
         )
         .await
     }
@@ -594,13 +556,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<PaginationParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "list_exercise_templates",
             None,
             Category::Read,
-            self.hevy
-                .list_exercise_templates(params.page, params.page_size),
+            hevy.list_exercise_templates(params.page, params.page_size),
         )
         .await
     }
@@ -618,13 +580,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<SearchTemplatesParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "search_exercise_templates",
             None,
             Category::Read,
-            self.hevy
-                .search_exercise_templates(&params.query, params.page, params.page_size),
+            hevy.search_exercise_templates(&params.query, params.page, params.page_size),
         )
         .await
     }
@@ -642,13 +604,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<ExerciseTemplateIdParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "get_exercise_template",
             Some(&params.exercise_template_id),
             Category::Read,
-            self.hevy
-                .get_exercise_template(&params.exercise_template_id),
+            hevy.get_exercise_template(&params.exercise_template_id),
         )
         .await
     }
@@ -667,12 +629,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateExerciseTemplateParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "create_exercise_template",
             None,
             Category::Write,
-            self.hevy.create_exercise_template(&params.body),
+            hevy.create_exercise_template(&params.body),
         )
         .await
     }
@@ -690,13 +653,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<PaginationParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "list_routine_folders",
             None,
             Category::Read,
-            self.hevy
-                .list_routine_folders(params.page, params.page_size),
+            hevy.list_routine_folders(params.page, params.page_size),
         )
         .await
     }
@@ -715,12 +678,13 @@ impl HevyMcpService {
         Parameters(params): Parameters<RoutineFolderIdParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
         let resource = params.folder_id.to_string();
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "get_routine_folder",
             Some(&resource),
             Category::Read,
-            self.hevy.get_routine_folder(params.folder_id),
+            hevy.get_routine_folder(params.folder_id),
         )
         .await
     }
@@ -739,12 +703,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateRoutineFolderParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "create_routine_folder",
             None,
             Category::Write,
-            self.hevy.create_routine_folder(&params.body),
+            hevy.create_routine_folder(&params.body),
         )
         .await
     }
@@ -762,12 +727,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<ExerciseHistoryParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "get_exercise_history",
             Some(&params.exercise_template_id),
             Category::Read,
-            self.hevy.get_exercise_history(
+            hevy.get_exercise_history(
                 &params.exercise_template_id,
                 params.start_date.as_deref(),
                 params.end_date.as_deref(),
@@ -789,13 +755,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<PaginationParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "list_body_measurements",
             None,
             Category::Read,
-            self.hevy
-                .list_body_measurements(params.page, params.page_size),
+            hevy.list_body_measurements(params.page, params.page_size),
         )
         .await
     }
@@ -813,12 +779,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<BodyMeasurementDateParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "get_body_measurement",
             Some(&params.date),
             Category::Read,
-            self.hevy.get_body_measurement(&params.date),
+            hevy.get_body_measurement(&params.date),
         )
         .await
     }
@@ -837,12 +804,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<CreateBodyMeasurementParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "create_body_measurement",
             Some(&params.body.date),
             Category::Write,
-            self.hevy.create_body_measurement(&params.body),
+            hevy.create_body_measurement(&params.body),
         )
         .await
     }
@@ -861,13 +829,13 @@ impl HevyMcpService {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<UpdateBodyMeasurementParams>,
     ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        let hevy = self.hevy_from_context(&context)?;
         self.run_hevy_call(
             &context,
             "update_body_measurement",
             Some(&params.date),
             Category::Write,
-            self.hevy
-                .update_body_measurement(&params.date, &params.body),
+            hevy.update_body_measurement(&params.date, &params.body),
         )
         .await
     }

@@ -11,31 +11,22 @@ first-party.
 2. Run `git status` when this directory is a Git worktree.
 3. Report the current branch, next task, and failing tests.
 
-## Public OAuth contract
+## Public auth contract
 
 - Origin: `https://hevy-mcp.oddie.app`
-- MCP and RFC 9728 resource: `https://hevy-mcp.oddie.app/mcp`
-- `HEVY_MCP_RESOURCE_URL` is the origin without `/mcp`.
-- Authorization server: `https://login.kampong.social/oidc`
-- Logto callback: `https://hevy-mcp.oddie.app/oauth/callback`
-- DCR client ID: `uw7dfhsvg6wq0p0eavk2i`
-- Accept JWT audiences for both the origin and `{origin}/mcp`.
-- `WWW-Authenticate` must point to
-  `/.well-known/oauth-protected-resource/mcp`.
-- Keep exact redirect allowlisting for claude.ai, claude.com, Cursor, Grok Bot,
-  and loopback localhost. Custom schemes are first-class. Never add an
-  `allow_insecure_uris` escape hatch.
-- Never log OAuth tokens, Authorization headers, or the Hevy API key.
+- MCP: `https://hevy-mcp.oddie.app/mcp`
+- Connector auth is `Authorization: Bearer <Hevy API key>`.
+- Forward that same value to Hevy as the `api-key` header.
+- No Logto, DCR, OAuth, or OIDC. Do not serve RFC 9728 metadata.
+- Unauthenticated `/mcp` returns `401` with `WWW-Authenticate: Bearer`.
+- Never log Authorization headers or the Hevy API key.
 
 ## Hevy backend
 
 - Default base URL: `https://api.hevyapp.com`; override only through
   `HEVY_MCP_HEVY_BASE_URL`.
-- Send `HEVY_API_KEY` as the `api-key` header. Accept `HEVY_MCP_API_KEY` as an
-  alias.
-- Missing Hevy key is a supported boot state: `/health` stays 200, `whoami`
-  returns Logto identity, and Hevy-backed tools return
-  `hevy_api_key_missing`.
+- The API key is request-scoped. Do not read `HEVY_API_KEY` or
+  `HEVY_MCP_API_KEY` from the process environment.
 - Writes execute immediately. There is no dry-run default.
 - Create/update workouts and routines require `exercise_template_id` from the
   exercise-template tools. Never invent IDs.
@@ -43,11 +34,6 @@ first-party.
   search endpoint.
 - Keep reads and writes on their separate rate-limit quotas.
 - Use rustls-only reqwest.
-
-## Secret source
-
-The deployment ExternalSecret reads 1Password item `hevy-mcp`, field
-`api-key`, from the `Oddie Apps` vault. Never commit secret values.
 
 ## Verification
 
@@ -62,11 +48,9 @@ cargo deny check
 
 Required regression coverage:
 
-- unauthenticated `/health` returns 200 even without a Hevy key;
-- unauthenticated `/mcp` returns 401 with path-aware resource metadata;
-- RFC 9728 `resource` equals `https://hevy-mcp.oddie.app/mcp`;
-- DCR accepts the four Cursor/Grok callback URIs in one registration and
-  returns the pre-provisioned client ID;
+- unauthenticated `/health` returns 200;
+- unauthenticated `/mcp` returns 401 with a plain Bearer challenge;
+- `Authorization: Bearer <key>` initialize is not 401;
 - wiremock verifies Hevy `api-key`, pagination query names, workouts, and user
   info.
 

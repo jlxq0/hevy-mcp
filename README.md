@@ -1,28 +1,24 @@
 # hevy-mcp
 
-First-party Rust MCP server for Julian's Hevy Pro account. It uses axum,
-rmcp streamable HTTP, Logto OAuth/JWT validation, and a thin rustls-only
-client for Hevy's official REST API. It does not use a third-party Hevy MCP
-server or Hevy client crate.
+First-party Rust MCP server for Hevy. It uses axum, rmcp streamable HTTP, and
+a thin rustls-only client for Hevy's official REST API. It does not use
+Logto, DCR, OAuth, OIDC, a third-party Hevy MCP server, or a Hevy client crate.
 
 Public endpoint: `https://hevy-mcp.oddie.app/mcp`
 
 ## Authentication
 
-MCP clients authenticate with Logto at `https://login.kampong.social/oidc`.
-RFC 9728 metadata advertises the canonical resource
-`https://hevy-mcp.oddie.app/mcp`; inbound JWT audiences may be either the
-origin or that `/mcp` URL.
+Connector auth is the caller's Hevy API key as an HTTP bearer token:
 
-Hevy calls use the process-level `HEVY_API_KEY` header value. The alias
-`HEVY_MCP_API_KEY` is also accepted. The key is redacted from `Debug` output
-and is never logged. A missing key does not prevent startup or `/health` from
-returning 200: `whoami` still returns the Logto identity, while Hevy-backed
-tools return the structured code `hevy_api_key_missing`.
+```http
+Authorization: Bearer <Hevy API key>
+```
 
-Deployment sources the key from the 1Password item `hevy-mcp`, field
-`api-key`, in the `Oddie Apps` vault through an ExternalSecret. No secret
-value belongs in Git.
+The server forwards that same value to Hevy as the `api-key` header. There is
+no process-level Hevy key and no authorization-server metadata. Missing or
+non-Bearer `Authorization` returns `401` with `WWW-Authenticate: Bearer`.
+
+Do not log the key, put it in git, or print it in Debug output.
 
 ## Tools
 
@@ -43,29 +39,18 @@ or one of `6`, `7`, `7.5`, `8`, `8.5`, `9`, `9.5`, `10`.
 
 ## Environment
 
-Required for the public service:
-
-```text
-HEVY_MCP_RESOURCE_URL=https://hevy-mcp.oddie.app
-HEVY_MCP_AUTHORIZATION_SERVER=https://login.kampong.social/oidc
-HEVY_MCP_DCR_CLIENT_ID=uw7dfhsvg6wq0p0eavk2i
-HEVY_MCP_OAUTH_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback,https://www.cursor.com/agents/mcp/oauth/callback,cursor://anysphere.cursor-mcp/oauth/callback,grokbot://mcp/oauth/callback,http://localhost:8787/callback
-HEVY_API_KEY=<from ExternalSecret>
-```
-
-Optional:
-
 ```text
 HEVY_MCP_HEVY_BASE_URL=https://api.hevyapp.com
 HEVY_MCP_BIND_ADDR=0.0.0.0:3000
 HEVY_MCP_METRICS_BIND_ADDR=127.0.0.1:9090
 HEVY_MCP_RATE_LIMIT_READS_PER_MIN=60
 HEVY_MCP_RATE_LIMIT_WRITES_PER_MIN=30
-HEVY_MCP_TRUSTED_PROXY_HOPS=1
+HEVY_MCP_ALLOWED_HOSTS=localhost,127.0.0.1,::1,hevy-mcp.oddie.app
 HEVY_MCP_LOG_FORMAT=json
 ```
 
-`HEVY_MCP_RESOURCE_URL` is always the origin without `/mcp`.
+All of the above are optional. The Hevy API key is request-scoped and is not
+read from the environment.
 
 ## Development
 

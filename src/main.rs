@@ -1,23 +1,17 @@
 //! hevy-mcp: first-party streamable-HTTP MCP server for Hevy.
 //!
-//! Logto authenticates MCP callers; a process-level Hevy Pro API key
-//! authorizes calls to the official Hevy REST API.
+//! Each MCP request carries a Hevy API key as its bearer token. Tool calls
+//! forward that request-scoped value to the official Hevy REST API.
 
 mod audit;
 mod auth;
 mod config;
 mod hevy_client;
-mod last_used;
-mod logto_oidc;
 mod mcp;
 mod metrics;
-mod oauth_metadata;
-mod oauth_proxy;
-mod oauth_redirect;
 mod rate_limit;
 mod session;
 mod telemetry;
-mod token_introspect;
 #[allow(dead_code)]
 mod url_safety;
 
@@ -30,18 +24,16 @@ use axum::extract::State;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::get;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::auth::{AccessToken, AuthState, bearer_auth};
+use crate::auth::{AccessToken, bearer_auth};
 use crate::config::Config;
 use crate::hevy_client::HevyClient;
-use crate::logto_oidc::LogtoValidationClient;
 use crate::mcp::HevyMcpService;
-use crate::oauth_metadata::{authorization_server_metadata, protected_resource_metadata, register};
 use crate::rate_limit::{InitializeLimiter, Limiter, MAX_INITIALIZES_PER_IDENTITY};
 
 #[tokio::main]
@@ -74,16 +66,7 @@ async fn main() -> Result<()> {
 }
 
 fn build_app(config: Config) -> Result<Router> {
-    let logto = LogtoValidationClient::new(
-        &config.authorization_server,
-        config.accepted_token_audiences(),
-    )?;
-    let hevy = HevyClient::new(&config.hevy_base_url, config.hevy_api_key.clone())?;
-    let auth_state = AuthState {
-        config: config.clone(),
-        logto,
-        last_used: last_used::LastUsedTracker::new(),
-    };
+    let hevy = HevyClient::new(&config.hevy_base_url)?;
     let limiter = Arc::new(
         Limiter::new(
             config.rate_limit_reads_per_min,
@@ -91,25 +74,14 @@ fn build_app(config: Config) -> Result<Router> {
         )
         .ok_or_else(|| anyhow::anyhow!("rate-limit quotas must be greater than zero"))?,
     );
-    Ok(build_router(config, auth_state, hevy, limiter))
+    Ok(build_router(config, hevy, limiter))
 }
 
-fn build_router(
-    config: Config,
-    auth_state: AuthState,
-    hevy: HevyClient,
-    limiter: Arc<Limiter>,
-) -> Router {
-    let resource_host = parse_host(&config.resource_url);
-    let mut allowed_hosts = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
-    if let Some(host) = resource_host {
-        allowed_hosts.push(host);
-    }
-
+fn build_router(config: Config, hevy: HevyClient, limiter: Arc<Limiter>) -> Router {
     let mcp_service = StreamableHttpService::new(
         move || Ok(HevyMcpService::new(hevy.clone(), Arc::clone(&limiter))),
         Arc::new(session::CappedSessionManager::new()),
-        StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts),
+        StreamableHttpServerConfig::default().with_allowed_hosts(config.allowed_hosts),
     );
 
     let initialize_limiter = Arc::new(InitializeLimiter::new(
@@ -119,46 +91,16 @@ fn build_router(
 
     let mcp_routes = Router::new()
         .nest_service("/mcp", mcp_service)
-        .route("/token/introspect", get(token_introspect::handler))
         .layer(middleware::from_fn_with_state(
             initialize_limiter,
             initialize_rate_limit,
         ))
-        .layer(middleware::from_fn_with_state(
-            auth_state.clone(),
-            bearer_auth,
-        ))
-        .with_state(auth_state);
+        .layer(middleware::from_fn(bearer_auth));
 
     Router::new()
         .route("/health", get(health))
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(protected_resource_metadata),
-        )
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(protected_resource_metadata),
-        )
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(authorization_server_metadata),
-        )
-        .route("/register", post(register))
-        .merge(
-            Router::new()
-                .route("/authorize", get(oauth_proxy::authorize))
-                .route("/oauth/callback", get(oauth_proxy::callback))
-                .route("/token", post(oauth_proxy::token))
-                .with_state(oauth_proxy::OAuthProxyState::new(
-                    &config.authorization_server,
-                    &config.resource_url,
-                    config.oauth_redirect_uris.clone(),
-                )),
-        )
         .merge(mcp_routes)
         .layer(TraceLayer::new_for_http())
-        .with_state(config)
 }
 
 async fn health() -> impl IntoResponse {
@@ -180,21 +122,8 @@ async fn initialize_rate_limit(
         )
             .into_response();
     };
-    let Some(identity) = request
-        .extensions()
-        .get::<crate::logto_oidc::AuthenticatedIdentity>()
-    else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "authenticated request missing identity extension\n",
-        )
-            .into_response();
-    };
     let bearer_hash = audit::token_hash(&token.0);
-    if limiter
-        .check(&bearer_hash, Some(identity.user_id.as_str()))
-        .is_err()
-    {
+    if limiter.check(&bearer_hash).is_err() {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "too many MCP initialize requests; try again later\n",
@@ -206,15 +135,6 @@ async fn initialize_rate_limit(
 
 fn is_fresh_mcp_session_request(request: &Request<Body>) -> bool {
     request.method() == Method::POST && request.headers().get("mcp-session-id").is_none()
-}
-
-fn parse_host(url: &str) -> Option<String> {
-    let after_scheme = url.split("://").nth(1)?;
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    (!authority.is_empty()).then(|| authority.to_owned())
 }
 
 fn init_tracing() {
@@ -252,41 +172,27 @@ mod tests {
     use std::net::SocketAddr;
 
     use axum::body::{Body, to_bytes};
-    use axum::http::{Request, header};
-    use serde_json::{Value, json};
+    use axum::http::{HeaderValue, Request, header};
     use tower::ServiceExt;
+    use wiremock::matchers::{header as wiremock_header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
-    fn test_config() -> Config {
-        Config::new(
-            "https://hevy-mcp.oddie.app",
-            "https://login.kampong.social/oidc",
-            "https://api.hevyapp.com",
-            SocketAddr::from(([0, 0, 0, 0], 3000)),
-        )
-        .unwrap()
+    fn test_config(hevy_base_url: &str) -> Config {
+        Config::new(hevy_base_url, SocketAddr::from(([0, 0, 0, 0], 3000))).unwrap()
     }
 
-    fn router(config: Config) -> Router {
-        let logto = LogtoValidationClient::new(
-            &config.authorization_server,
-            config.accepted_token_audiences(),
-        )
-        .unwrap();
-        let hevy = HevyClient::new(&config.hevy_base_url, config.hevy_api_key.clone()).unwrap();
-        let auth_state = AuthState {
-            config: config.clone(),
-            logto,
-            last_used: crate::last_used::LastUsedTracker::new(),
-        };
+    fn router(hevy_base_url: &str) -> Router {
+        let config = test_config(hevy_base_url);
+        let hevy = HevyClient::new(&config.hevy_base_url).unwrap();
         let limiter = Arc::new(Limiter::new(100_000, 100_000).unwrap());
-        build_router(config, auth_state, hevy, limiter)
+        build_router(config, hevy, limiter)
     }
 
     #[tokio::test]
-    async fn health_is_public() {
-        let response = router(test_config())
+    async fn health_is_public_without_a_hevy_key() {
+        let response = router("https://api.hevyapp.com")
             .oneshot(
                 Request::builder()
                     .uri("/health")
@@ -299,8 +205,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_without_token_returns_401_with_path_metadata() {
-        let response = router(test_config())
+    async fn mcp_without_bearer_returns_plain_401_challenge() {
+        let response = router("https://api.hevyapp.com")
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -311,63 +217,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let challenge = response
-            .headers()
-            .get(header::WWW_AUTHENTICATE)
-            .unwrap()
-            .to_str()
-            .unwrap();
         assert_eq!(
-            challenge,
-            r#"Bearer resource_metadata="https://hevy-mcp.oddie.app/.well-known/oauth-protected-resource/mcp""#
+            response.headers().get(header::WWW_AUTHENTICATE),
+            Some(&HeaderValue::from_static("Bearer"))
         );
+        assert!(!response.headers().contains_key("resource_metadata"));
     }
 
     #[tokio::test]
-    async fn path_aware_metadata_has_canonical_resource() {
-        let response = router(test_config())
-            .oneshot(
-                Request::builder()
-                    .uri("/.well-known/oauth-protected-resource/mcp")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-        let metadata: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(metadata["resource"], "https://hevy-mcp.oddie.app/mcp");
+    async fn mcp_rejects_empty_and_non_bearer_authorization() {
+        for authorization in ["Bearer ", "Basic abc"] {
+            let response = router("https://api.hevyapp.com")
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header(header::AUTHORIZATION, authorization)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers().get(header::WWW_AUTHENTICATE),
+                Some(&HeaderValue::from_static("Bearer"))
+            );
+        }
     }
 
     #[tokio::test]
-    async fn dcr_accepts_cursor_and_grok_uri_set() {
-        let redirect_uris = vec![
-            "cursor://anysphere.cursor-mcp/oauth/callback",
-            "grokbot://mcp/oauth/callback",
-            "http://localhost:8787/callback",
-            "https://www.cursor.com/agents/mcp/oauth/callback",
-        ];
-        let mut config = test_config();
-        config.dcr_client_id = Some("uw7dfhsvg6wq0p0eavk2i".to_owned());
-        config.oauth_redirect_uris = redirect_uris.iter().map(|uri| (*uri).to_owned()).collect();
-        let response = router(config)
+    async fn request_bearer_is_forwarded_to_hevy_user_info() {
+        let hevy_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/user/info"))
+            .and(wiremock_header("api-key", "request-hevy-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"id": "hevy-user"}
+            })))
+            .expect(1)
+            .mount(&hevy_server)
+            .await;
+
+        let app = router(&hevy_server.uri());
+        let initialize = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/register")
+                    .uri("/mcp")
+                    .header(header::HOST, "hevy-mcp.oddie.app")
+                    .header(header::AUTHORIZATION, "Bearer request-hevy-key")
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
                     .body(Body::from(
-                        serde_json::to_vec(&json!({ "redirect_uris": redirect_uris })).unwrap(),
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(initialize.status(), StatusCode::OK);
+        let session_id = initialize.headers().get("mcp-session-id").unwrap().clone();
 
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-        let registration: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(registration["client_id"], "uw7dfhsvg6wq0p0eavk2i");
+        let tool_call = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::HOST, "hevy-mcp.oddie.app")
+                    .header(header::AUTHORIZATION, "Bearer request-hevy-key")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header("mcp-session-id", session_id)
+                    .header("mcp-protocol-version", "2025-06-18")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami","arguments":{}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tool_call.status(), StatusCode::OK);
+        let body = to_bytes(tool_call.into_body(), 64 * 1024).await.unwrap();
+        assert!(!body.is_empty());
+        hevy_server.verify().await;
     }
 }
