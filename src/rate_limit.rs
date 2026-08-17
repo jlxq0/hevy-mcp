@@ -13,9 +13,6 @@ use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 
-/// Maximum number of fresh MCP sessions one bearer may open in a short burst.
-pub const MAX_INITIALIZES_PER_IDENTITY: u32 = 8;
-
 type Bucket = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +86,9 @@ fn get_or_insert_with_quota(
 
 /// Rate limiter for fresh MCP `initialize` requests. Tool quotas cannot cover
 /// this path because rmcp creates a session before dispatching any tool.
+///
+/// Burst and replenish period come from [`crate::config::Config`]; see the
+/// defaults there for why they are sized the way they are.
 #[derive(Debug)]
 pub struct InitializeLimiter {
     quota: Quota,

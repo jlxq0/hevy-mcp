@@ -34,7 +34,7 @@ use crate::auth::{AccessToken, bearer_auth};
 use crate::config::Config;
 use crate::hevy_client::HevyClient;
 use crate::mcp::HevyMcpService;
-use crate::rate_limit::{InitializeLimiter, Limiter, MAX_INITIALIZES_PER_IDENTITY};
+use crate::rate_limit::{InitializeLimiter, Limiter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -78,16 +78,16 @@ fn build_app(config: Config) -> Result<Router> {
 }
 
 fn build_router(config: Config, hevy: HevyClient, limiter: Arc<Limiter>) -> Router {
+    let initialize_limiter = Arc::new(InitializeLimiter::new(
+        config.initialize_replenish,
+        config.initialize_burst,
+    ));
+
     let mcp_service = StreamableHttpService::new(
         move || Ok(HevyMcpService::new(hevy.clone(), Arc::clone(&limiter))),
         Arc::new(session::CappedSessionManager::new()),
         StreamableHttpServerConfig::default().with_allowed_hosts(config.allowed_hosts),
     );
-
-    let initialize_limiter = Arc::new(InitializeLimiter::new(
-        session::SESSION_KEEP_ALIVE,
-        MAX_INITIALIZES_PER_IDENTITY,
-    ));
 
     // Bearer auth must stay nested under /mcp. In axum 0.7 a `.layer()` on a
     // merged router becomes a catch-all, so unknown paths (including OAuth

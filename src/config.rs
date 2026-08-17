@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -12,11 +13,20 @@ const ENV_METRICS_BIND_ADDR: &str = "HEVY_MCP_METRICS_BIND_ADDR";
 const ENV_POD_IP: &str = "POD_IP";
 const ENV_RATE_LIMIT_READS: &str = "HEVY_MCP_RATE_LIMIT_READS_PER_MIN";
 const ENV_RATE_LIMIT_WRITES: &str = "HEVY_MCP_RATE_LIMIT_WRITES_PER_MIN";
+const ENV_INITIALIZE_BURST: &str = "HEVY_MCP_RATE_LIMIT_INITIALIZE_BURST";
+const ENV_INITIALIZE_REPLENISH_SECS: &str = "HEVY_MCP_RATE_LIMIT_INITIALIZE_REPLENISH_SECS";
 const ENV_ALLOWED_HOSTS: &str = "HEVY_MCP_ALLOWED_HOSTS";
 
 const DEFAULT_HEVY_BASE_URL: &str = "https://api.hevyapp.com";
 const DEFAULT_RATE_LIMIT_READS: u32 = 60;
 const DEFAULT_RATE_LIMIT_WRITES: u32 = 30;
+// A connector opens a fresh session on every reconnect, and a reconnect loop
+// bursts several in seconds. The previous 8-with-one-token-per-30-minutes
+// meant one retry storm locked a bearer out for hours. The real ceilings are
+// elsewhere: MAX_SESSIONS caps concurrency globally and the read/write quotas
+// cap actual work, so this bucket only has to stop a runaway client.
+const DEFAULT_INITIALIZE_BURST: u32 = 32;
+const DEFAULT_INITIALIZE_REPLENISH_SECS: u32 = 60;
 const DEFAULT_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1", "hevy-mcp.oddie.app"];
 
 #[derive(Clone, Debug)]
@@ -27,6 +37,10 @@ pub struct Config {
     pub metrics_bind_addr: SocketAddr,
     pub rate_limit_reads_per_min: u32,
     pub rate_limit_writes_per_min: u32,
+    /// Fresh `initialize` requests one bearer may burst before throttling.
+    pub initialize_burst: u32,
+    /// How long it takes to replenish a single `initialize` token.
+    pub initialize_replenish: Duration,
     pub allowed_hosts: Vec<String>,
 }
 
@@ -40,6 +54,8 @@ impl Config {
             metrics_bind_addr: SocketAddr::from(([127, 0, 0, 1], 9090)),
             rate_limit_reads_per_min: DEFAULT_RATE_LIMIT_READS,
             rate_limit_writes_per_min: DEFAULT_RATE_LIMIT_WRITES,
+            initialize_burst: DEFAULT_INITIALIZE_BURST,
+            initialize_replenish: Duration::from_secs(u64::from(DEFAULT_INITIALIZE_REPLENISH_SECS)),
             allowed_hosts: default_allowed_hosts(),
         })
     }
@@ -61,6 +77,11 @@ impl Config {
             parse_rate_limit(ENV_RATE_LIMIT_READS, DEFAULT_RATE_LIMIT_READS)?;
         config.rate_limit_writes_per_min =
             parse_rate_limit(ENV_RATE_LIMIT_WRITES, DEFAULT_RATE_LIMIT_WRITES)?;
+        config.initialize_burst = parse_rate_limit(ENV_INITIALIZE_BURST, DEFAULT_INITIALIZE_BURST)?;
+        config.initialize_replenish = Duration::from_secs(u64::from(parse_rate_limit(
+            ENV_INITIALIZE_REPLENISH_SECS,
+            DEFAULT_INITIALIZE_REPLENISH_SECS,
+        )?));
         config.allowed_hosts = parse_allowed_hosts(std::env::var(ENV_ALLOWED_HOSTS).ok())?;
         Ok(config)
     }
@@ -176,6 +197,20 @@ mod tests {
             vec!["one.test", "two.test"]
         );
         assert!(parse_allowed_hosts(Some(" , ".to_owned())).is_err());
+    }
+
+    #[test]
+    fn initialize_bucket_defaults_absorb_a_connector_retry_storm() {
+        let config = config();
+        assert_eq!(config.initialize_burst, DEFAULT_INITIALIZE_BURST);
+        assert_eq!(
+            config.initialize_replenish,
+            Duration::from_secs(u64::from(DEFAULT_INITIALIZE_REPLENISH_SECS))
+        );
+        // The old hardcoded pair was 8 tokens replenishing one per 30 minutes,
+        // which a single reconnect loop exhausted for hours.
+        assert!(config.initialize_burst > 8);
+        assert!(config.initialize_replenish.as_secs() < 30 * 60);
     }
 
     #[test]
