@@ -42,11 +42,9 @@ fn extract_bearer(header: Option<&HeaderValue>) -> Option<String> {
 }
 
 fn unauthorized() -> Response {
-    let mut response = (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response();
-    response
-        .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-    response
+    // Static API key, not RFC 6750 OAuth. A Bearer challenge makes Cursor
+    // start OAuth discovery. Return a bare 401.
+    (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
 }
 
 #[cfg(test)]
@@ -82,12 +80,9 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_has_plain_bearer_challenge() {
+    fn unauthorized_has_no_www_authenticate() {
         let response = unauthorized();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            response.headers().get(header::WWW_AUTHENTICATE),
-            Some(&HeaderValue::from_static("Bearer"))
-        );
+        assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
     }
 }

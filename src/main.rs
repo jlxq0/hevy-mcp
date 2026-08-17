@@ -24,7 +24,7 @@ use axum::extract::State;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{any, get};
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
@@ -89,8 +89,11 @@ fn build_router(config: Config, hevy: HevyClient, limiter: Arc<Limiter>) -> Rout
         MAX_INITIALIZES_PER_IDENTITY,
     ));
 
+    // Bearer auth must stay nested under /mcp. In axum 0.7 a `.layer()` on a
+    // merged router becomes a catch-all, so unknown paths (including OAuth
+    // well-known discovery) would 401 and Cursor would treat this as OAuth.
     let mcp_routes = Router::new()
-        .nest_service("/mcp", mcp_service)
+        .fallback_service(mcp_service)
         .layer(middleware::from_fn_with_state(
             initialize_limiter,
             initialize_rate_limit,
@@ -99,8 +102,30 @@ fn build_router(config: Config, hevy: HevyClient, limiter: Arc<Limiter>) -> Rout
 
     Router::new()
         .route("/health", get(health))
-        .merge(mcp_routes)
+        .route(
+            "/.well-known/oauth-authorization-server",
+            any(oauth_probe_not_found),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            any(oauth_probe_not_found),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            any(oauth_probe_not_found),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            any(oauth_probe_not_found),
+        )
+        .route("/oauth-protected-resource/mcp", any(oauth_probe_not_found))
+        .route("/openid-configuration", any(oauth_probe_not_found))
+        .nest("/mcp", mcp_routes)
         .layer(TraceLayer::new_for_http())
+}
+
+async fn oauth_probe_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 async fn health() -> impl IntoResponse {
@@ -172,7 +197,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use axum::body::{Body, to_bytes};
-    use axum::http::{HeaderValue, Request, header};
+    use axum::http::{Request, header};
     use tower::ServiceExt;
     use wiremock::matchers::{header as wiremock_header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -202,10 +227,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
     }
 
     #[tokio::test]
-    async fn mcp_without_bearer_returns_plain_401_challenge() {
+    async fn mcp_without_bearer_returns_bare_401() {
         let response = router("https://api.hevyapp.com")
             .oneshot(
                 Request::builder()
@@ -217,11 +243,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            response.headers().get(header::WWW_AUTHENTICATE),
-            Some(&HeaderValue::from_static("Bearer"))
-        );
+        assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
         assert!(!response.headers().contains_key("resource_metadata"));
+    }
+
+    #[tokio::test]
+    async fn oauth_discovery_and_unknown_paths_are_plain_404() {
+        for uri in [
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/openid-configuration",
+            "/oauth-protected-resource/mcp",
+            "/openid-configuration",
+            "/no-such-path",
+        ] {
+            let response = router("https://api.hevyapp.com")
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert!(
+                response.headers().get(header::WWW_AUTHENTICATE).is_none(),
+                "{uri}"
+            );
+            assert!(
+                !response.headers().contains_key("resource_metadata"),
+                "{uri}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -239,10 +289,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            assert_eq!(
-                response.headers().get(header::WWW_AUTHENTICATE),
-                Some(&HeaderValue::from_static("Bearer"))
-            );
+            assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
         }
     }
 

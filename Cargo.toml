@@ -1,6 +1,6 @@
 [package]
 name = "hevy-mcp"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.93"
 description = "First-party streamable-HTTP MCP server for the Hevy REST API"

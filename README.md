@@ -16,7 +16,8 @@ Authorization: Bearer <Hevy API key>
 
 The server forwards that same value to Hevy as the `api-key` header. There is
 no process-level Hevy key and no authorization-server metadata. Missing or
-non-Bearer `Authorization` returns `401` with `WWW-Authenticate: Bearer`.
+non-Bearer `Authorization` on `/mcp` returns `401` with no
+`WWW-Authenticate` header. OAuth and OIDC well-known probes return `404`.
 
 Do not log the key, put it in git, or print it in Debug output.
 

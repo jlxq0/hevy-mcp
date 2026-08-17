@@ -18,7 +18,8 @@ first-party.
 - Connector auth is `Authorization: Bearer <Hevy API key>`.
 - Forward that same value to Hevy as the `api-key` header.
 - No Logto, DCR, OAuth, or OIDC. Do not serve RFC 9728 metadata.
-- Unauthenticated `/mcp` returns `401` with `WWW-Authenticate: Bearer`.
+- Unauthenticated `/mcp` returns `401` with no `WWW-Authenticate` header.
+- `/.well-known/oauth-*` and `openid-configuration` return `404` with no `WWW-Authenticate`.
 - Never log Authorization headers or the Hevy API key.
 
 ## Hevy backend
@@ -49,7 +50,8 @@ cargo deny check
 Required regression coverage:
 
 - unauthenticated `/health` returns 200;
-- unauthenticated `/mcp` returns 401 with a plain Bearer challenge;
+- unauthenticated `/mcp` returns 401 with no WWW-Authenticate;
+- OAuth/OIDC well-known probes return 404 with no WWW-Authenticate;
 - `Authorization: Bearer <key>` initialize is not 401;
 - wiremock verifies Hevy `api-key`, pagination query names, workouts, and user
   info.
