@@ -841,6 +841,16 @@ impl HevyMcpService {
     }
 }
 
+// `unused_async_trait_impl` (new in clippy 1.98) fires on the `ServerHandler`
+// methods `#[tool_handler]` generates, not on anything written here. The macro
+// decides whether its expansions await, so there is nothing to rewrite.
+//
+// This attribute is what pins the tree's lint floor at clippy 1.98 exactly: an
+// `#[allow]` naming a lint the running clippy does not have is itself an error
+// under `-D warnings`, so this line reds 1.97 and below. The tree still
+// *builds* on 1.93, which is what `rust-version` says and what the Dockerfile's
+// `rust:1.93-bookworm` builder enforces. See AGENTS.md.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for HevyMcpService {
     fn get_info(&self) -> ServerInfo {

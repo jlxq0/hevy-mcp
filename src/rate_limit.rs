@@ -116,7 +116,7 @@ impl InitializeLimiter {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::duration_suboptimal_units)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn initialize_limiter_denies_after_burst() {
-        let limiter = InitializeLimiter::new(Duration::from_secs(60), 2);
+        let limiter = InitializeLimiter::new(Duration::from_mins(1), 2);
         limiter.check("hash").unwrap();
         limiter.check("hash").unwrap();
         assert!(limiter.check("hash").is_err());

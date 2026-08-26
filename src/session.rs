@@ -45,10 +45,7 @@ pub const MAX_SESSIONS: usize = 256;
 /// stale session id, 404s, and silently drops). The global
 /// [`MAX_SESSIONS`] cap remains the real defence against an
 /// authenticated session flood.
-// `Duration::from_mins` is unstable on our MSRV (Rust 1.93); use `from_secs`
-// and suppress the clippy lint that would suggest the nicer-named constructor.
-#[allow(clippy::duration_suboptimal_units)]
-pub const SESSION_KEEP_ALIVE: Duration = Duration::from_secs(30 * 60);
+pub const SESSION_KEEP_ALIVE: Duration = Duration::from_mins(30);
 
 /// Build a `LocalSessionManager` with the tightened idle TTL.
 ///
