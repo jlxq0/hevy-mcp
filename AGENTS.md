@@ -147,11 +147,17 @@ Required regression coverage:
 
 - **A job that dies within a few seconds of starting did not fail, it never
   ran.** Run 16913 lasted two seconds; the retry of the same branch built in 63.
-  The runner is capacity 1 and shared by every repository in the fleet, so this
-  is contention and the answer is to push again, not to read the diff. A real
-  failure in this workflow takes at least as long as the step that failed —
-  the buildcache race took 42 to 58 seconds, because the image had to build
-  first.
+  The runner is capacity 1 and shared by every repository in the fleet, so that
+  is contention, and the answer is to push again rather than to read the diff.
+
+  **Duration is not the discriminator, though, and reading it as one is the
+  trap this bullet nearly set.** A `docker` job here legitimately finishes in
+  ten to twenty seconds — 17003 in 10s, 17070 in 19s, both genuine — because
+  buildkitd's local layer cache hits every Rust layer when no source changed.
+  `cargo` ran in 2m22s and then in 39s on the same day, same gates. What
+  separates "never ran" from "ran fast" is whether a task exists in
+  `GET actions/tasks` for that sha and job name, not the clock. Anyone
+  baselining job duration in this repository is measuring cache state.
 
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
