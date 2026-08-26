@@ -105,6 +105,54 @@ Required regression coverage:
   `Duration::from_secs(60)` that 1.96 and 1.97 flagged and 1.98 no longer does;
   it is `from_mins(1)` now and needs no suppression on any of the four.
 
+- **Exactly one `docker` job may export to `:buildcache`, and it is the `main`
+  one.** Merging a pull request and pushing the release tag behind it are two
+  pushes seconds apart, so two `docker` jobs run at once, and while both
+  exported `mode=max` to the same unqualified ref one of them lost the blob
+  write. `m365-mcp` runs 49 and 50 are where that was read off a log:
+  `#21 exporting cache to registry / ERROR: error writing layer blob: unknown`,
+  two jobs failing half a second apart.
+
+  Here it is inference from timing, because **job logs are not retrievable on
+  this instance** — `runs/{n}/jobs/{m}/logs` 404s over both the API and the web
+  path, so a red job is diagnosed by reproduction and by shape, never by
+  reading it. The shape: this repository's last `main` push has read red since
+  2026-08-17, where run 8 (main, `80c2d25`) failed its docker job twice while
+  run 9 (tag `v0.3.0`, the same commit) succeeded three seconds later. v0.2.0
+  did the same. The two releases whose tag and main pushes were 80 to 90
+  seconds apart both passed.
+
+  The tag build now imports and does not export. It is the same commit as the
+  `main` build before it — the branches differ only in `TAGS` and `PUSH`, which
+  are output settings rather than build inputs — so its cache would have been
+  byte-identical. `grep -c export-cache .forgejo/workflows/ci.yml` is 1 and
+  should stay 1. Do not reach for a `concurrency:` group instead: Forgejo
+  job-level `concurrency:` is unverified on this instance and an unsupported
+  workflow key is ignored in silence, so it would look applied and do nothing.
+  Do not add a `schedule:` trigger without revisiting this — a cron run's
+  `GITHUB_REF` is `refs/heads/main`, which is the branch that exports.
+
+- **A `docker` job skipped because `needs: cargo` failed posts `success` to the
+  commit status.** So a green docker beside a red cargo means nothing, and
+  reading the status API alone will tell you an image built when none did.
+  Measured here on 2026-08-26: `failure CI / cargo` at 05:23:03Z and
+  `success CI / docker` at 05:23:04Z on PR #2, the same pair one second apart on
+  PR #3, and no docker task in `GET actions/tasks` for either. matrix-mcp and
+  m365-mcp show the same fault. Confirm a docker job by finding its task, not by
+  reading its tick.
+
+  Durations off that endpoint need the same care. Several 2026-08-17 runs carry
+  an `updated_at` two days after their `run_started_at`, which is a backfill and
+  not a two-day build.
+
+- **A job that dies within a few seconds of starting did not fail, it never
+  ran.** Run 16913 lasted two seconds; the retry of the same branch built in 63.
+  The runner is capacity 1 and shared by every repository in the fleet, so this
+  is contention and the answer is to push again, not to read the diff. A real
+  failure in this workflow takes at least as long as the step that failed —
+  the buildcache race took 42 to 58 seconds, because the image had to build
+  first.
+
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
   `git ls-remote` and update to an advertised immutable commit.
