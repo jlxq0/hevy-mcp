@@ -7,9 +7,11 @@ first-party.
 
 ## Session protocol
 
-1. Read `Plan.md` if present.
-2. Run `git status` when this directory is a Git worktree.
-3. Report the current branch, next task, and failing tests.
+1. Run `git status` when this directory is a Git worktree.
+2. Report the current branch, next task, and failing tests.
+
+Anything with a state goes in a Forgejo issue, not a file. There is no
+`Plan.md` here and there should not be one.
 
 ## Public auth contract
 
