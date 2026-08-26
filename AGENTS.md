@@ -198,6 +198,22 @@ Required regression coverage:
   scrubbing that name from the README in b7167c2 achieved nothing. Dropping or
   renaming an entry here changes `oddie-apps/platform` in the same breath.
 
+  **The bearer middleware answers before rmcp's host check, so an
+  unauthenticated probe cannot see a host misconfiguration.** Measured on the
+  four combinations: with a bearer, `localhost` is 200 and any other name is
+  403; without one, both are 401. A `POST /mcp` carrying no `Authorization` is
+  therefore 401 whether the allow-list is right or wrong, and so is `/health`
+  at 200. The check that distinguishes them needs a bearer and nothing else —
+  `initialize` never calls Hevy, so any non-empty value works:
+
+      curl -o /dev/null -w '%{http_code}' -X POST https://<origin>/mcp \
+        -H 'Authorization: Bearer probe' \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
+
+  200 means the origin is on the list. 403 means it is not.
+
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
   `git ls-remote` and update to an advertised immutable commit.
