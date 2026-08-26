@@ -132,6 +132,27 @@ Required regression coverage:
   Do not add a `schedule:` trigger without revisiting this — a cron run's
   `GITHUB_REF` is `refs/heads/main`, which is the branch that exports.
 
+- **A `docker` job skipped because `needs: cargo` failed posts `success` to the
+  commit status.** So a green docker beside a red cargo means nothing, and
+  reading the status API alone will tell you an image built when none did.
+  Measured here on 2026-08-26: `failure CI / cargo` at 05:23:03Z and
+  `success CI / docker` at 05:23:04Z on PR #2, the same pair one second apart on
+  PR #3, and no docker task in `GET actions/tasks` for either. matrix-mcp and
+  m365-mcp show the same fault. Confirm a docker job by finding its task, not by
+  reading its tick.
+
+  Durations off that endpoint need the same care. Several 2026-08-17 runs carry
+  an `updated_at` two days after their `run_started_at`, which is a backfill and
+  not a two-day build.
+
+- **A job that dies within a few seconds of starting did not fail, it never
+  ran.** Run 16913 lasted two seconds; the retry of the same branch built in 63.
+  The runner is capacity 1 and shared by every repository in the fleet, so this
+  is contention and the answer is to push again, not to read the diff. A real
+  failure in this workflow takes at least as long as the step that failed —
+  the buildcache race took 42 to 58 seconds, because the image had to build
+  first.
+
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
   `git ls-remote` and update to an advertised immutable commit.
