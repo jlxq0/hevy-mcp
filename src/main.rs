@@ -209,10 +209,75 @@ mod tests {
     }
 
     fn router(hevy_base_url: &str) -> Router {
-        let config = test_config(hevy_base_url);
+        build(test_config(hevy_base_url))
+    }
+
+    /// A router whose `allowed_hosts` came from configuration rather than the
+    /// loopback default, the way `HEVY_MCP_ALLOWED_HOSTS` supplies it in the
+    /// deployment.
+    fn router_with_hosts(hevy_base_url: &str, hosts: &[&str]) -> Router {
+        let mut config = test_config(hevy_base_url);
+        config.allowed_hosts = hosts.iter().map(|host| (*host).to_owned()).collect();
+        build(config)
+    }
+
+    fn build(config: Config) -> Router {
         let hevy = HevyClient::new(&config.hevy_base_url).unwrap();
         let limiter = Arc::new(Limiter::new(100_000, 100_000).unwrap());
         build_router(config, hevy, limiter)
+    }
+
+    /// Status of a bearer-carrying `initialize` sent with a given `Host`.
+    async fn initialize_with_host(app: Router, host: &str) -> StatusCode {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header(header::HOST, host)
+                .header(header::AUTHORIZATION, "Bearer request-hevy-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    /// The published default must not carry any deployment's public origin.
+    /// rmcp answers 403 to a Host outside `allowed_hosts`, so this is the
+    /// check that a public origin now comes from the environment: on the
+    /// default config it is just another rejected host.
+    #[tokio::test]
+    async fn default_allowed_hosts_are_loopback_only() {
+        for (host, rejected) in [
+            ("localhost", false),
+            ("127.0.0.1", false),
+            ("hevy-mcp.example", true),
+            ("evil.example", true),
+        ] {
+            let status = initialize_with_host(router("https://api.hevyapp.com"), host).await;
+            assert_eq!(
+                status == StatusCode::FORBIDDEN,
+                rejected,
+                "{host} returned {status}"
+            );
+        }
+    }
+
+    /// The same origin is accepted once it is configured, which is what
+    /// `HEVY_MCP_ALLOWED_HOSTS` does in the deployment.
+    #[tokio::test]
+    async fn a_configured_public_host_is_accepted() {
+        let status = initialize_with_host(
+            router_with_hosts("https://api.hevyapp.com", &["hevy-mcp.example"]),
+            "hevy-mcp.example",
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -306,14 +371,14 @@ mod tests {
             .mount(&hevy_server)
             .await;
 
-        let app = router(&hevy_server.uri());
+        let app = router_with_hosts(&hevy_server.uri(), &["hevy-mcp.example"]);
         let initialize = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/mcp")
-                    .header(header::HOST, "hevy-mcp.oddie.app")
+                    .header(header::HOST, "hevy-mcp.example")
                     .header(header::AUTHORIZATION, "Bearer request-hevy-key")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::ACCEPT, "application/json, text/event-stream")
@@ -332,7 +397,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/mcp")
-                    .header(header::HOST, "hevy-mcp.oddie.app")
+                    .header(header::HOST, "hevy-mcp.example")
                     .header(header::AUTHORIZATION, "Bearer request-hevy-key")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::ACCEPT, "application/json, text/event-stream")
