@@ -141,6 +141,13 @@ Required regression coverage:
   m365-mcp show the same fault. Confirm a docker job by finding its task, not by
   reading its tick.
 
+  **This is why `main`'s protection rule requires `CI / cargo*` and not
+  `CI / docker`.** A required docker context would be satisfied by a skip, so
+  the gate would pass on a commit where nothing was built — decorative in the
+  same way a rule with `enable_push: true` and no status check is. Do not add
+  it "for completeness". The glob covers both event suffixes, since a pull
+  request head carries `(pull_request)` and a branch push carries `(push)`.
+
   Durations off that endpoint need the same care. Several 2026-08-17 runs carry
   an `updated_at` two days after their `run_started_at`, which is a backfill and
   not a two-day build.
