@@ -148,6 +148,14 @@ Required regression coverage:
   it "for completeness". The glob covers both event suffixes, since a pull
   request head carries `(pull_request)` and a branch push carries `(push)`.
 
+  `apply_to_admins` is `true`, and the rule refuses a merge from the ops token
+  rather than only from a stranger: with an unsatisfiable context temporarily
+  armed, `POST pulls/8/merge` returned **405, "Not all required status checks
+  successful"**. The cost is deliberate and worth knowing before you hit it.
+  PR #2 was merged red on purpose, with the reason stated in advance, and that
+  is no longer possible without patching the rule first. Patch it, merge, patch
+  it back, and say on the pull request that you did.
+
   Durations off that endpoint need the same care. Several 2026-08-17 runs carry
   an `updated_at` two days after their `run_started_at`, which is a backfill and
   not a two-day build.
