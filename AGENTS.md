@@ -223,6 +223,32 @@ Required regression coverage:
 
   200 means the origin is on the list. 403 means it is not.
 
+  **From outside, that probe has no negative control, and the obvious one is a
+  trap.** Sending `-H "Host: wrong.example"` to the public name returns 200,
+  not because the check is absent but because SNI still says
+  `hevy-mcp.oddie.app` while the HTTP `Host` differs, so the Gateway never
+  matches the HTTPRoute and something else in the ingress path answers. A
+  negative probe that never reaches the process looks exactly like the process
+  behaving.
+
+  Run the negative control **inside the cluster**, where there is no SNI:
+  `kubectl port-forward -n hevy-mcp deploy/hevy-mcp 18500:3000` and vary the
+  `Host` header. Measured against `v0.4.0` on 2026-08-27:
+
+  | `Host` | status |
+  |---|---|
+  | `hevy-mcp.oddie.app` | 200 |
+  | `localhost` | 403 |
+  | `wrong.example` | 403 |
+  | `hevy-mcp.kampong.social` | 403 |
+
+  **The `localhost` row is the one that carries the answer.** It is in
+  `DEFAULT_ALLOWED_HOSTS` and it is rejected, which is only possible if the
+  environment variable replaced the default rather than extending it. Under
+  `v0.3.0` both `localhost` and `hevy-mcp.oddie.app` would return 200 from the
+  compiled list, so that pair is what separates "the variable is doing the
+  work" from "the old default still is".
+
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
   `git ls-remote` and update to an advertised immutable commit.
