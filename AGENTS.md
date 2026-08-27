@@ -135,6 +135,15 @@ Required regression coverage:
   Do not add a `schedule:` trigger without revisiting this — a cron run's
   `GITHUB_REF` is `refs/heads/main`, which is the branch that exports.
 
+  **`v0.4.0` did not verify this and a green release generally will not.**
+  All four jobs passed, but the two `docker` jobs never overlapped: `main`
+  finished 02:04:15Z and the tag started 02:05:39Z, because the runner has
+  capacity 1 and serialised them. An unpatched workflow would have passed that
+  run too. The v0.2.0 and v0.3.0 pairs that failed overlapped for most of a
+  minute. **What verifies the fix is a release where the two `docker` windows
+  overlap**, which cannot be arranged by pushing the tag faster since the queue
+  decides. Record the windows, not the colour.
+
 - **A `docker` job skipped because `needs: cargo` failed posts `success` to the
   commit status.** So a green docker beside a red cargo means nothing, and
   reading the status API alone will tell you an image built when none did.
