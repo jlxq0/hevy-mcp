@@ -135,6 +135,15 @@ Required regression coverage:
   Do not add a `schedule:` trigger without revisiting this — a cron run's
   `GITHUB_REF` is `refs/heads/main`, which is the branch that exports.
 
+  **`v0.4.0` did not verify this and a green release generally will not.**
+  All four jobs passed, but the two `docker` jobs never overlapped: `main`
+  finished 02:04:15Z and the tag started 02:05:39Z, because the runner has
+  capacity 1 and serialised them. An unpatched workflow would have passed that
+  run too. The v0.2.0 and v0.3.0 pairs that failed overlapped for most of a
+  minute. **What verifies the fix is a release where the two `docker` windows
+  overlap**, which cannot be arranged by pushing the tag faster since the queue
+  decides. Record the windows, not the colour.
+
 - **A `docker` job skipped because `needs: cargo` failed posts `success` to the
   commit status.** So a green docker beside a red cargo means nothing, and
   reading the status API alone will tell you an image built when none did.
@@ -213,6 +222,32 @@ Required regression coverage:
         -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
 
   200 means the origin is on the list. 403 means it is not.
+
+  **From outside, that probe has no negative control, and the obvious one is a
+  trap.** Sending `-H "Host: wrong.example"` to the public name returns 200,
+  not because the check is absent but because SNI still says
+  `hevy-mcp.oddie.app` while the HTTP `Host` differs, so the Gateway never
+  matches the HTTPRoute and something else in the ingress path answers. A
+  negative probe that never reaches the process looks exactly like the process
+  behaving.
+
+  Run the negative control **inside the cluster**, where there is no SNI:
+  `kubectl port-forward -n hevy-mcp deploy/hevy-mcp 18500:3000` and vary the
+  `Host` header. Measured against `v0.4.0` on 2026-08-27:
+
+  | `Host` | status |
+  |---|---|
+  | `hevy-mcp.oddie.app` | 200 |
+  | `localhost` | 403 |
+  | `wrong.example` | 403 |
+  | `hevy-mcp.kampong.social` | 403 |
+
+  **The `localhost` row is the one that carries the answer.** It is in
+  `DEFAULT_ALLOWED_HOSTS` and it is rejected, which is only possible if the
+  environment variable replaced the default rather than extending it. Under
+  `v0.3.0` both `localhost` and `hevy-mcp.oddie.app` would return 200 from the
+  compiled list, so that pair is what separates "the variable is doing the
+  work" from "the old default still is".
 
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
