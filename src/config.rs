@@ -27,7 +27,12 @@ const DEFAULT_RATE_LIMIT_WRITES: u32 = 30;
 // cap actual work, so this bucket only has to stop a runaway client.
 const DEFAULT_INITIALIZE_BURST: u32 = 32;
 const DEFAULT_INITIALIZE_REPLENISH_SECS: u32 = 60;
-const DEFAULT_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1", "hevy-mcp.oddie.app"];
+// Loopback only. The public origin a deployment answers on is deployment
+// configuration and belongs in `HEVY_MCP_ALLOWED_HOSTS`, not in a published
+// source file — this repository is public. A deployment that does not set the
+// variable serves loopback and rejects everything else with 403, which is the
+// safe direction to fail.
+const DEFAULT_ALLOWED_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -178,16 +183,14 @@ mod tests {
     }
 
     #[test]
-    fn constructor_normalizes_url_and_sets_public_host_defaults() {
+    fn constructor_normalizes_url_and_defaults_to_loopback_hosts_only() {
         let config = config();
         assert_eq!(config.hevy_base_url, "https://api.hevyapp.com");
-        assert!(config.allowed_hosts.iter().any(|host| host == "localhost"));
-        assert!(
-            config
-                .allowed_hosts
-                .iter()
-                .any(|host| host == "hevy-mcp.oddie.app")
-        );
+        // Loopback and nothing else. This file is published, so a
+        // deployment's public origin belongs in `HEVY_MCP_ALLOWED_HOSTS`
+        // rather than here, and an exact match is what keeps one from being
+        // added back for convenience.
+        assert_eq!(config.allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
     }
 
     #[test]

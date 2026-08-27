@@ -46,12 +46,18 @@ HEVY_MCP_BIND_ADDR=0.0.0.0:3000
 HEVY_MCP_METRICS_BIND_ADDR=127.0.0.1:9090
 HEVY_MCP_RATE_LIMIT_READS_PER_MIN=60
 HEVY_MCP_RATE_LIMIT_WRITES_PER_MIN=30
-HEVY_MCP_ALLOWED_HOSTS=localhost,127.0.0.1,::1,hevy-mcp.your-domain.example
+HEVY_MCP_ALLOWED_HOSTS=hevy-mcp.your-domain.example
 HEVY_MCP_LOG_FORMAT=json
 ```
 
-All of the above are optional. The Hevy API key is request-scoped and is not
-read from the environment.
+All of the above are optional except one. `HEVY_MCP_ALLOWED_HOSTS` defaults to
+`localhost,127.0.0.1,::1`, and a request whose `Host` is not on the list is
+answered `403`, so a deployment reachable on a public name must set it to that
+name or it will reject every real request. The default is loopback rather than
+any particular origin because this repository is public and an origin is
+deployment configuration.
+
+The Hevy API key is request-scoped and is not read from the environment.
 
 ## Development
 

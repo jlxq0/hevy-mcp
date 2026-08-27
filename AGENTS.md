@@ -23,6 +23,9 @@ Anything with a state goes in a Forgejo issue, not a file. There is no
 - Unauthenticated `/mcp` returns `401` with no `WWW-Authenticate` header.
 - `/.well-known/oauth-*` and `openid-configuration` return `404` with no `WWW-Authenticate`.
 - Never log Authorization headers or the Hevy API key.
+- The public origin is deployment configuration, supplied by
+  `HEVY_MCP_ALLOWED_HOSTS`. It is not a default in `src/`, and it does not go
+  into this file or the README either: the repository is public.
 
 ## Hevy backend
 
@@ -173,6 +176,43 @@ Required regression coverage:
   separates "never ran" from "ran fast" is whether a task exists in
   `GET actions/tasks` for that sha and job name, not the clock. Anyone
   baselining job duration in this repository is measuring cache state.
+  The runner is capacity 1 and shared by every repository in the fleet, so this
+  is contention and the answer is to push again, not to read the diff. A real
+  failure in this workflow takes at least as long as the step that failed —
+  the buildcache race took 42 to 58 seconds, because the image had to build
+  first.
+- **`HEVY_MCP_ALLOWED_HOSTS` is load-bearing and its default will not serve a
+  public deployment.** rmcp validates `Host` against the list and answers `403`
+  to anything outside it — measured, not assumed: on the default config
+  `initialize` returns 200 for `localhost` and 403 for any other name, and the
+  same name returns non-403 once it is configured. Both directions are pinned by
+  tests in `src/main.rs`, and putting a public host back into
+  `DEFAULT_ALLOWED_HOSTS` turns two of them red.
+
+  The default is `localhost,127.0.0.1,::1` and names no origin, so a deployment
+  on a public name that does not set the variable rejects every real request
+  with 403 while `/health` keeps answering 200 — a green pod serving nothing,
+  the same failure shape as the old hardcoded initialize bucket. Until
+  2026-08-26 the live origin was a `DEFAULT_ALLOWED_HOSTS` entry in
+  `src/config.rs`, which is why production worked without the variable and why
+  scrubbing that name from the README in b7167c2 achieved nothing. Dropping or
+  renaming an entry here changes `oddie-apps/platform` in the same breath.
+
+  **The bearer middleware answers before rmcp's host check, so an
+  unauthenticated probe cannot see a host misconfiguration.** Measured on the
+  four combinations: with a bearer, `localhost` is 200 and any other name is
+  403; without one, both are 401. A `POST /mcp` carrying no `Authorization` is
+  therefore 401 whether the allow-list is right or wrong, and so is `/health`
+  at 200. The check that distinguishes them needs a bearer and nothing else —
+  `initialize` never calls Hevy, so any non-empty value works:
+
+      curl -o /dev/null -w '%{http_code}' -X POST https://<origin>/mcp \
+        -H 'Authorization: Bearer probe' \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
+
+  200 means the origin is on the list. 403 means it is not.
 
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
