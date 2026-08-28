@@ -249,6 +249,42 @@ Required regression coverage:
   compiled list, so that pair is what separates "the variable is doing the
   work" from "the old default still is".
 
+- **A rate limit and an empty read must never be the same silence, and one
+  function decides.** `audit::class_for_code` is the only place a JSON-RPC code
+  becomes a class, and the audit event's `outcome`, its `error_class` field and
+  the `data.class` a client sees on the wire are all derived from it. Do not add
+  a second mapping anywhere: the defect this replaced was exactly that, with
+  `emit_tool_audit` calling both rate-limit codes `rate_limited` while
+  `error_class` knew only `-32029` and filed `-32012` under `other`. One event,
+  two fields, disagreeing, and no series answering "how often is a Hevy read
+  rate-limited".
+
+  Measured through `/mcp`, which is what a client actually receives. All four
+  are `HTTP 200`; the discriminator is the `error` key against the `result` key:
+
+  | condition | envelope |
+  |---|---|
+  | Hevy answers 429 | `error`, `-32012`, `data.class = "rate_limited"` |
+  | our per-bearer limiter | `error`, `-32029`, `data.class = "rate_limited"` |
+  | empty workout list | `result`, `isError: false`, `workouts: []` |
+  | count of zero | `result`, `isError: false`, `workout_count: 0` |
+
+  A caller telling "unreadable" from "empty" writes one comparison on
+  `data.class`. `data.code` still distinguishes ours from Hevy's underneath it.
+  The consumer that reported "no workout logged" on a day Julian trained had an
+  error in its hands and discarded it, so the boundary was already
+  distinguishable and this change is about making one predicate enough.
+
+  **Do not add a retry.** A retry that succeeds hides how often the first read
+  fails, and that rate is the measurement worth having.
+
+  `src/main.rs`'s `a_rate_limit_never_arrives_as_an_empty_read` drives the real
+  path rather than the constructor, and that distinction is load-bearing: the
+  first version of it built the errors by calling `structured_error` directly,
+  passed, and **stayed green when the local limiter was reverted to carrying no
+  `data` at all.** A test that pins a constructor pins nothing about the call
+  site.
+
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
   `git ls-remote` and update to an advertised immutable commit.

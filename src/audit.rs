@@ -42,18 +42,37 @@ pub fn token_hash(token: &str) -> String {
     hex::encode(&digest[..8])
 }
 
-/// JSON-RPC application code: caller exceeded their per-minute quota.
+/// JSON-RPC application code: caller exceeded their per-minute quota here,
+/// before Hevy was called at all.
 pub const RATE_LIMITED_CODE: i32 = -32029;
 
+/// JSON-RPC application code: Hevy answered 429 to a call we forwarded.
+pub const HEVY_RATE_LIMITED_CODE: i32 = -32012;
+
+/// The class a caller and a dashboard both key on.
+///
+/// **This is the only place a JSON-RPC code becomes a class.** The audit
+/// event's `outcome`, its `error_class` field, and the `data.class` a client
+/// sees on the wire are all derived from this function, so they cannot
+/// disagree about one event. They did: `emit_tool_audit` called both rate
+/// limit codes `rate_limited` while this function knew only `-32029` and filed
+/// `-32012` under `other`, so a Hevy 429 was rate-limited in one field of an
+/// event and unclassified in another, and the series that would answer "how
+/// often is a Hevy read rate-limited" did not exist.
 #[must_use]
 pub const fn error_class(err: &ErrorData) -> &'static str {
-    match err.code.0 {
+    class_for_code(err.code.0)
+}
+
+#[must_use]
+pub const fn class_for_code(code: i32) -> &'static str {
+    match code {
         -32700 => "parse",
         -32600 => "invalid_request",
         -32601 => "method_not_found",
         -32602 => "invalid_params",
         -32603 => "internal",
-        RATE_LIMITED_CODE => "rate_limited",
+        RATE_LIMITED_CODE | HEVY_RATE_LIMITED_CODE => outcome::RATE_LIMITED,
         _ => "other",
     }
 }

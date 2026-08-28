@@ -358,6 +358,131 @@ mod tests {
         }
     }
 
+    /// Drive a tool call and return the JSON-RPC envelope a client receives.
+    async fn tool_call_envelope(app: Router, tool: &str) -> serde_json::Value {
+        let initialize = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::HOST, "hevy-mcp.example")
+                    .header(header::AUTHORIZATION, "Bearer k")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let session_id = initialize.headers().get("mcp-session-id").unwrap().clone();
+        let call = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header(header::HOST, "hevy-mcp.example")
+                    .header(header::AUTHORIZATION, "Bearer k")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header("mcp-session-id", session_id)
+                    .header("mcp-protocol-version", "2025-06-18")
+                    .body(Body::from(format!(
+                        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(call.into_body(), 64 * 1024).await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        let line = text.lines().rfind(|line| line.starts_with("data: {"));
+        assert!(line.is_some(), "no JSON-RPC frame in response: {text}");
+        serde_json::from_str(line.unwrap().trim_start_matches("data: ")).unwrap()
+    }
+
+    /// What a caller writes to tell "unreadable" from "empty".
+    fn caller_sees_rate_limit(envelope: &serde_json::Value) -> bool {
+        envelope
+            .get("error")
+            .and_then(|error| error.get("data"))
+            .and_then(|data| data.get("class"))
+            .and_then(serde_json::Value::as_str)
+            == Some("rate_limited")
+    }
+
+    /// A rate limit and an empty read must not be the same silence.
+    ///
+    /// The 21:00 slot that reports whether a gym day went unlogged reads this
+    /// boundary, so an error arriving as an empty result is a confident wrong
+    /// answer rather than an absence somebody questions. Both rate limits are
+    /// matched by one predicate on `data.class`; an empty list and a zero count
+    /// are successful results and match nothing.
+    #[tokio::test]
+    async fn a_rate_limit_never_arrives_as_an_empty_read() {
+        // Our own per-bearer limiter, which answers before Hevy is called.
+        let hevy_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workouts/count"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"workout_count": 7})),
+            )
+            .mount(&hevy_server)
+            .await;
+        let mut config = test_config(&hevy_server.uri());
+        config.allowed_hosts = vec!["hevy-mcp.example".to_owned()];
+        let hevy = HevyClient::new(&config.hevy_base_url).unwrap();
+        let app = build_router(config, hevy, Arc::new(Limiter::new(1, 1).unwrap()));
+
+        let first = tool_call_envelope(app.clone(), "count_workouts").await;
+        assert!(first.get("result").is_some(), "first call: {first}");
+        assert!(!caller_sees_rate_limit(&first));
+
+        let throttled = tool_call_envelope(app, "count_workouts").await;
+        assert!(throttled.get("result").is_none(), "expected an error");
+        assert!(
+            caller_sees_rate_limit(&throttled),
+            "local rate limit is invisible to a caller matching data.class: {throttled}"
+        );
+
+        // Hevy's own 429, forwarded.
+        let throttling_hevy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workouts/count"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&throttling_hevy)
+            .await;
+        let upstream = tool_call_envelope(
+            router_with_hosts(&throttling_hevy.uri(), &["hevy-mcp.example"]),
+            "count_workouts",
+        )
+        .await;
+        assert!(
+            caller_sees_rate_limit(&upstream),
+            "upstream rate limit is invisible to the same predicate: {upstream}"
+        );
+
+        // An empty page and a zero count are results, and match nothing.
+        let empty_hevy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workouts"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"page": 1, "page_count": 1, "workouts": []})),
+            )
+            .mount(&empty_hevy)
+            .await;
+        let empty = tool_call_envelope(
+            router_with_hosts(&empty_hevy.uri(), &["hevy-mcp.example"]),
+            "list_workouts",
+        )
+        .await;
+        assert!(empty.get("result").is_some(), "empty read must be a result");
+        assert!(!caller_sees_rate_limit(&empty));
+    }
+
     #[tokio::test]
     async fn request_bearer_is_forwarded_to_hevy_user_info() {
         let hevy_server = MockServer::start().await;
