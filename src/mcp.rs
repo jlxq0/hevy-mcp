@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{Instrument as _, Span};
 
-use crate::audit::{self, outcome};
+use crate::audit::{self, HEVY_RATE_LIMITED_CODE, outcome};
 use crate::auth::AccessToken;
 use crate::hevy_client::{
     BodyMeasurementInput, CreateExerciseTemplateBody, CreateRoutineFolderBody, HevyClient,
@@ -23,7 +23,6 @@ use crate::rate_limit::{Category, Limiter};
 
 const HEVY_API_KEY_MISSING_CODE: i32 = -32_010;
 const HEVY_API_KEY_REJECTED_CODE: i32 = -32_011;
-const HEVY_RATE_LIMITED_CODE: i32 = -32_012;
 
 #[derive(Clone)]
 pub struct HevyMcpService {
@@ -56,13 +55,7 @@ impl HevyMcpService {
         let bearer_hash = audit::token_hash(&token.0);
         self.rate_limiter
             .check(&bearer_hash, category)
-            .map_err(|_| {
-                ErrorData::new(
-                    rmcp::model::ErrorCode(audit::RATE_LIMITED_CODE),
-                    "rate limit exceeded; try again in a minute".to_owned(),
-                    None,
-                )
-            })
+            .map_err(|_| structured_error(audit::RATE_LIMITED_CODE, "rate_limited"))
     }
 
     fn hevy_from_context(
@@ -119,25 +112,30 @@ fn missing_token_error() -> ErrorData {
     ErrorData::internal_error("no access token in request context", None)
 }
 
-fn structured_hevy_error(code: i32, message: &'static str) -> ErrorData {
+/// Build an application error whose `data` a caller can match on.
+///
+/// `code` identifies the exact condition; `class` is the single predicate,
+/// derived from `audit::class_for_code` so the wire, the audit event and the
+/// metric always agree. Both rate limits carry `class == "rate_limited"`, so a
+/// caller distinguishing "unreadable" from "empty" writes one comparison
+/// rather than enumerating codes or substring-matching an English sentence.
+fn structured_error(code: i32, message: &str) -> ErrorData {
     ErrorData::new(
         rmcp::model::ErrorCode(code),
         message.to_owned(),
-        Some(json!({ "code": message })),
+        Some(json!({ "code": message, "class": audit::class_for_code(code) })),
     )
 }
 
 fn map_hevy_error(error: HevyError) -> ErrorData {
     match error {
         HevyError::ApiKeyMissing => {
-            structured_hevy_error(HEVY_API_KEY_MISSING_CODE, "hevy_api_key_missing")
+            structured_error(HEVY_API_KEY_MISSING_CODE, "hevy_api_key_missing")
         }
         HevyError::Unauthorized => {
-            structured_hevy_error(HEVY_API_KEY_REJECTED_CODE, "hevy_api_key_rejected")
+            structured_error(HEVY_API_KEY_REJECTED_CODE, "hevy_api_key_rejected")
         }
-        HevyError::RateLimited => {
-            structured_hevy_error(HEVY_RATE_LIMITED_CODE, "hevy_rate_limited")
-        }
+        HevyError::RateLimited => structured_error(HEVY_RATE_LIMITED_CODE, "hevy_rate_limited"),
         HevyError::InvalidInput(message) => ErrorData::invalid_params(message, None),
         HevyError::NotFound => ErrorData::invalid_params("Hevy resource not found", None),
         HevyError::Conflict => ErrorData::invalid_params("Hevy resource conflict", None),
@@ -168,14 +166,15 @@ fn emit_tool_audit(
     let (outcome_value, error_class) = match result {
         Ok(_) => (outcome::OK, None),
         Err(error) => {
-            let outcome_value = if error.code.0 == audit::RATE_LIMITED_CODE
-                || error.code.0 == HEVY_RATE_LIMITED_CODE
-            {
+            // One function decides, so the two fields cannot disagree about
+            // one event. See `audit::error_class`.
+            let class = audit::error_class(error);
+            let outcome_value = if class == outcome::RATE_LIMITED {
                 outcome::RATE_LIMITED
             } else {
                 outcome::ERROR
             };
-            (outcome_value, Some(audit::error_class(error)))
+            (outcome_value, Some(class))
         }
     };
     span.record("outcome", outcome_value);
@@ -865,6 +864,52 @@ impl ServerHandler for HevyMcpService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defect was two fields of one event disagreeing, so the assertion is
+    /// the agreement rather than either value on its own.
+    #[test]
+    fn outcome_and_error_class_agree_on_every_code() {
+        for code in [
+            audit::RATE_LIMITED_CODE,
+            HEVY_RATE_LIMITED_CODE,
+            HEVY_API_KEY_REJECTED_CODE,
+            HEVY_API_KEY_MISSING_CODE,
+            -32602,
+            -32603,
+        ] {
+            let error = structured_error(code, "probe");
+            let class = audit::error_class(&error);
+            let outcome_value = if class == outcome::RATE_LIMITED {
+                outcome::RATE_LIMITED
+            } else {
+                outcome::ERROR
+            };
+            assert_eq!(
+                class == outcome::RATE_LIMITED,
+                outcome_value == outcome::RATE_LIMITED,
+                "code {code} classified two ways"
+            );
+            let wire_class = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("class"))
+                .and_then(Value::as_str);
+            assert_eq!(
+                wire_class,
+                Some(class),
+                "code {code}: wire class differs from audit class"
+            );
+        }
+
+        // Both rate limits, specifically, reach the rate-limited outcome.
+        for code in [audit::RATE_LIMITED_CODE, HEVY_RATE_LIMITED_CODE] {
+            assert_eq!(
+                audit::error_class(&structured_error(code, "probe")),
+                outcome::RATE_LIMITED,
+                "code {code} is not counted as rate limited"
+            );
+        }
+    }
 
     #[test]
     fn missing_key_error_has_machine_readable_code() {
