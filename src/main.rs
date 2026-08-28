@@ -446,6 +446,21 @@ mod tests {
             caller_sees_rate_limit(&throttled),
             "local rate limit is invisible to a caller matching data.class: {throttled}"
         );
+        // `message` is what a human reads in a log and it must stay a sentence
+        // with the retry interval in it. Folding it into the machine code once
+        // reduced it to the bare token "rate_limited", which no test noticed.
+        let message = throttled["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("minute"),
+            "the retry interval is gone from the human message: {message:?}"
+        );
+        assert_ne!(
+            message,
+            throttled["error"]["data"]["code"]
+                .as_str()
+                .unwrap_or_default(),
+            "human message collapsed into the machine code"
+        );
 
         // Hevy's own 429, forwarded.
         let throttling_hevy = MockServer::start().await;
