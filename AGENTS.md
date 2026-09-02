@@ -285,6 +285,25 @@ Required regression coverage:
   `data` at all.** A test that pins a constructor pins nothing about the call
   site.
 
+- **A red `cargo audit` used to mean either "a vulnerability exists" or "the
+  advisory database could not be fetched", and job logs are not retrievable
+  here, so nobody could tell which.** `99a213b` is the specimen: `cargo (main)`
+  failed while `cargo (v0.4.2)` passed on the **same commit** eighteen seconds
+  later. Reproduced locally with the same command, `couldn't fetch advisory
+  database: git operation failed: failed to prepare fetch`, then two clean runs
+  immediately after. Fifty-one seconds, so not the never-ran shape either.
+
+  The fetch is now its own named step and `audit` runs `--no-fetch --db`, so
+  the step name is the diagnostic. A red `fetch advisory database` is the
+  network and wants a re-run; a red `audit` is a finding and wants a bump. Do
+  not fold them back together, and do not add a retry to the fetch: a retry
+  hides how often it fails, and the same two-signals-one-status shape is what
+  this file is mostly about.
+
+  Both halves are exercised rather than assumed: run against `v0.3.0`'s
+  lockfile, `cargo audit --no-fetch --db` still exits 1 on RUSTSEC-2026-0258,
+  so the split did not turn the gate into one that cannot fail.
+
 - Forgejo Actions may fail during `Set up job` when a pinned action commit is
   no longer advertised by the action mirror. Verify pinned revisions with
   `git ls-remote` and update to an advertised immutable commit.

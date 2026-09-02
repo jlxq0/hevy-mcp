@@ -51,10 +51,25 @@ jobs:
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: test
         run: cargo test --all-features --locked
+      # Two steps on purpose. A single `cargo audit` is red both when a
+      # vulnerability exists and when the advisory database cannot be fetched,
+      # and those want opposite responses. Job logs are not retrievable on this
+      # instance, so the step name is the only diagnostic anyone gets.
+      # `99a213b` is the specimen: `cargo (main)` failed while `cargo (v0.4.2)`
+      # passed on the same commit eighteen seconds later, and reproducing it
+      # locally gave `couldn't fetch advisory database: git operation failed`,
+      # then two clean runs.
+      - name: fetch advisory database
+        run: |
+          set -euo pipefail
+          DB="$(mktemp -d)/advisory-db"
+          git clone --depth 1 https://github.com/RustSec/advisory-db "$DB"
+          echo "ADVISORY_DB=$DB" >> "$GITHUB_ENV"
       - name: audit
         run: |
+          set -euo pipefail
           [ -x ~/.cargo/bin/cargo-audit ] || cargo install --locked cargo-audit
-          cargo audit
+          cargo audit --no-fetch --db "$ADVISORY_DB"
       - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1  # v2
         with: { command: check bans licenses sources }
 
