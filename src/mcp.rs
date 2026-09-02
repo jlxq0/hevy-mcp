@@ -55,7 +55,13 @@ impl HevyMcpService {
         let bearer_hash = audit::token_hash(&token.0);
         self.rate_limiter
             .check(&bearer_hash, category)
-            .map_err(|_| structured_error(audit::RATE_LIMITED_CODE, "rate_limited"))
+            .map_err(|_| {
+                structured_error(
+                    audit::RATE_LIMITED_CODE,
+                    "rate_limited",
+                    "rate limit exceeded; try again in a minute",
+                )
+            })
     }
 
     fn hevy_from_context(
@@ -119,23 +125,31 @@ fn missing_token_error() -> ErrorData {
 /// metric always agree. Both rate limits carry `class == "rate_limited"`, so a
 /// caller distinguishing "unreadable" from "empty" writes one comparison
 /// rather than enumerating codes or substring-matching an English sentence.
-fn structured_error(code: i32, message: &str) -> ErrorData {
+fn structured_error(code: i32, condition: &str, message: &str) -> ErrorData {
     ErrorData::new(
         rmcp::model::ErrorCode(code),
         message.to_owned(),
-        Some(json!({ "code": message, "class": audit::class_for_code(code) })),
+        Some(json!({ "code": condition, "class": audit::class_for_code(code) })),
     )
 }
 
 fn map_hevy_error(error: HevyError) -> ErrorData {
     match error {
-        HevyError::ApiKeyMissing => {
-            structured_error(HEVY_API_KEY_MISSING_CODE, "hevy_api_key_missing")
-        }
-        HevyError::Unauthorized => {
-            structured_error(HEVY_API_KEY_REJECTED_CODE, "hevy_api_key_rejected")
-        }
-        HevyError::RateLimited => structured_error(HEVY_RATE_LIMITED_CODE, "hevy_rate_limited"),
+        HevyError::ApiKeyMissing => structured_error(
+            HEVY_API_KEY_MISSING_CODE,
+            "hevy_api_key_missing",
+            "hevy_api_key_missing",
+        ),
+        HevyError::Unauthorized => structured_error(
+            HEVY_API_KEY_REJECTED_CODE,
+            "hevy_api_key_rejected",
+            "hevy_api_key_rejected",
+        ),
+        HevyError::RateLimited => structured_error(
+            HEVY_RATE_LIMITED_CODE,
+            "hevy_rate_limited",
+            "hevy_rate_limited",
+        ),
         HevyError::InvalidInput(message) => ErrorData::invalid_params(message, None),
         HevyError::NotFound => ErrorData::invalid_params("Hevy resource not found", None),
         HevyError::Conflict => ErrorData::invalid_params("Hevy resource conflict", None),
@@ -877,7 +891,7 @@ mod tests {
             -32602,
             -32603,
         ] {
-            let error = structured_error(code, "probe");
+            let error = structured_error(code, "probe", "probe");
             let class = audit::error_class(&error);
             let outcome_value = if class == outcome::RATE_LIMITED {
                 outcome::RATE_LIMITED
@@ -904,7 +918,7 @@ mod tests {
         // Both rate limits, specifically, reach the rate-limited outcome.
         for code in [audit::RATE_LIMITED_CODE, HEVY_RATE_LIMITED_CODE] {
             assert_eq!(
-                audit::error_class(&structured_error(code, "probe")),
+                audit::error_class(&structured_error(code, "probe", "probe")),
                 outcome::RATE_LIMITED,
                 "code {code} is not counted as rate limited"
             );
